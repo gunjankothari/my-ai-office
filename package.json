@@ -1,0 +1,27 @@
+{
+  "name": "agent-office",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev:hub": "npm run dev -w @agent-office/hub",
+    "dev:host": "npm run dev -w @agent-office/host",
+    "dev:web": "npm run dev -w @agent-office/web",
+    "build:web": "npm run build -w @agent-office/web",
+    "github": "tsx apps/host/src/cli/github.ts",
+    "agent": "tsx apps/host/src/cli/agent.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "~5.9.3"
+  }
+}

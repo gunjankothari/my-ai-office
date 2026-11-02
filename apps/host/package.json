@@ -1,0 +1,24 @@
+{
+  "name": "@agent-office/host",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test src/*.test.ts test/*.test.ts"
+  },
+  "dependencies": {
+    "@agent-office/shared": "*",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@agent-office/hub": "*",
+    "@types/ws": "^8.5.0"
+  }
+}

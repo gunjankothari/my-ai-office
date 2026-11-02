@@ -1,0 +1,19 @@
+{
+  "name": "@agent-office/hub",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/server.ts" },
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@agent-office/shared": "*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0"
+  }
+}
