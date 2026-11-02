@@ -20,11 +20,14 @@ export interface ParsedStream {
   tools: string[];
   retries: { attempt: number; error: string; status: number | null }[];
   assistantText?: string;
+  /** Names of tools the model asked for, and tools Claude Code blocked itself. Used to explain odd answers. */
+  toolUses: string[];
+  permissionDenials: string[];
   result?: StreamResult;
   badLines: number;
 }
 
-export const newParsed = (): ParsedStream => ({ mcp: [], tools: [], retries: [], badLines: 0 });
+export const newParsed = (): ParsedStream => ({ mcp: [], tools: [], retries: [], toolUses: [], permissionDenials: [], badLines: 0 });
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -49,9 +52,13 @@ export function feed(line: string, into: ParsedStream): string | undefined {
   } else if (j.type === "assistant" && isObj(j.message) && Array.isArray(j.message.content)) {
     const t = j.message.content.filter(isObj).filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text as string).join("\n");
     if (t) into.assistantText = t;
+    for (const b of j.message.content.filter(isObj)) if (b.type === "tool_use" && typeof b.name === "string") into.toolUses.push(b.name);
   } else if (j.type === "result") {
     const usage = isObj(j.usage) ? j.usage : {};
     const tokens = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].reduce((n, k) => n + (typeof usage[k] === "number" ? (usage[k] as number) : 0), 0);
+    if (Array.isArray(j.permission_denials)) {
+      into.permissionDenials = j.permission_denials.filter(isObj).map((d) => String(d.tool_name ?? "unknown")).slice(0, 20);
+    }
     into.result = {
       isError: j.is_error === true || (typeof j.subtype === "string" && j.subtype !== "success"),
       subtype: typeof j.subtype === "string" ? j.subtype : undefined,

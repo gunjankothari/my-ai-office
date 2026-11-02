@@ -42,8 +42,54 @@ export const Grant = z.object({
 });
 export type Grant = z.infer<typeof Grant>;
 
-export const TicketStatus = z.enum(["new", "planning", "progress", "review", "waiting", "done"]);
+/**
+ * Where a ticket is. "new" waits for the Manager, "planning" is the Manager deciding who takes it,
+ * "assigned" is queued for a worker, "progress" is a worker on it. The two "waiting" states are the
+ * only ones that need the user.
+ */
+export const TicketStatus = z.enum(["new", "planning", "assigned", "progress", "waiting_approval", "waiting_user", "done", "failed", "cancelled"]);
 export type TicketStatus = z.infer<typeof TicketStatus>;
+
+export type TicketPriority = "low" | "normal" | "high";
+export type TicketEventKind =
+  | "created" | "triage_started" | "assigned" | "started" | "approval_requested" | "approval_resolved"
+  | "asked_user" | "user_replied" | "comment" | "finished" | "failed" | "cancelled" | "rate_limited" | "interrupted";
+
+export interface TicketEvent {
+  ts: number;
+  kind: TicketEventKind;
+  /** "user", or an agent id. */
+  actor: string;
+  text?: string;
+  tokens?: number;
+  /** What this run would have cost on the pay-per-use API. On a flat plan nothing extra is charged. */
+  costUsd?: number;
+}
+
+export interface TicketUsage { tokens: number; costUsd: number; runs: number }
+
+export interface Ticket {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string;
+  status: TicketStatus;
+  priority: TicketPriority;
+  assigneeId?: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  /** The Manager that is (or last was) deciding who takes this. */
+  triageBy?: string;
+  /** The question the user is being asked, while status is waiting_user. */
+  question?: string;
+  /** The agent's final answer when the ticket is done. */
+  result?: string;
+  usage: TicketUsage;
+  /** Who worked on it, and what each cost. The Manager's triage counts. */
+  workers: Record<string, TicketUsage>;
+  events: TicketEvent[];
+}
 
 /** What the cloud hub is allowed to store about an office: counts and names only. */
 export const StatusSnapshot = z.object({
@@ -53,6 +99,8 @@ export const StatusSnapshot = z.object({
   pendingApprovals: z.number().int(),
   tokensToday: z.number().int(),
   projects: z.array(z.object({ id: z.string(), name: z.string(), agents: z.number().int() })),
+  /** Counts only. Ticket titles and text never leave the machine. */
+  tickets: z.object({ open: z.number().int(), working: z.number().int(), waitingForYou: z.number().int() }).optional(),
 });
 export type StatusSnapshot = z.infer<typeof StatusSnapshot>;
 

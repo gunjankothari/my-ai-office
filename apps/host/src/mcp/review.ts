@@ -38,6 +38,8 @@ export interface DiscoveredTool {
   suggestedResourceArgs: string[] | undefined;
   /** Argument names, so a UI can offer a drop-down for the resource limit. */
   args: string[];
+  /** The arguments the tool cannot be called without. Only these can honestly limit what a tool reaches. */
+  requiredArgs: string[];
   hash: string;
   reviewed: boolean;
   /** Was reviewed before, but the server has since changed the definition. */
@@ -72,9 +74,19 @@ export const argNames = (t: McpToolInfo): string[] => {
   return p ? Object.keys(p) : [];
 };
 
+export const requiredArgNames = (t: McpToolInfo): string[] => {
+  const required = (t.inputSchema as { required?: unknown } | undefined)?.required;
+  return Array.isArray(required) ? required.filter((x): x is string => typeof x === "string") : [];
+};
+
+/**
+ * A single argument is only suggested as a limit when it is required. If it is optional the tool can
+ * work without it (a search whose query names any repository), so a limit on it would look like
+ * protection without being any.
+ */
 export const suggestResourceArg = (t: McpToolInfo): string | undefined => {
-  const names = argNames(t);
-  return RESOURCE_NAMES.find((n) => names.includes(n));
+  const names = argNames(t), req = requiredArgNames(t);
+  return RESOURCE_NAMES.find((n) => names.includes(n) && req.includes(n));
 };
 
 /**
@@ -116,6 +128,7 @@ export function describe(t: McpToolInfo, entry: ReviewEntry | undefined): Discov
     suggestedResourceArg: suggestResourceArg(t),
     suggestedResourceArgs: suggestResourceArgs(t),
     args: argNames(t),
+    requiredArgs: requiredArgNames(t),
     hash,
     reviewed,
     changed: Boolean(entry && !reviewed),

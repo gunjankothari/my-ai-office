@@ -32,8 +32,8 @@ export interface ResumeState {
 }
 
 export type EngineOutcome =
-  | { status: "finished"; text: string; tokens?: number; equivalentCostUsd?: number }
-  | { status: "waiting_approval"; text: string; approvals: PendingApproval[]; resume: ResumeState }
+  | { status: "finished"; text: string; tokens?: number; equivalentCostUsd?: number; diagnostics?: { toolUses: string[]; permissionDenials: string[] } }
+  | { status: "waiting_approval"; text: string; approvals: PendingApproval[]; resume: ResumeState; tokens?: number; equivalentCostUsd?: number }
   | { status: "rate_limited"; message: string; resetAt?: number }
   | { status: "not_signed_in"; message: string }
   | { status: "network_problem"; message: string }

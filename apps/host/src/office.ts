@@ -15,6 +15,11 @@ import { ClaudeCodeEngine } from "./engines/claude-code";
 import type { AgentEngine, EngineAgent, EngineOutcome, ResumeState } from "./engines/types";
 import type { RunEvent } from "@agent-office/shared";
 import { PairingManager, TrustStore } from "./trust";
+import { TicketStore } from "./tickets";
+import { Dispatcher } from "./dispatcher";
+import { TeamServer, TEAM_CONNECTION, TEAM_TOOLS } from "./team-tools";
+import { handleTeamCommand } from "./team-commands";
+import { handleToolsCommand } from "./tools-commands";
 import { Vault } from "./vault";
 
 export interface AgentRecord {
@@ -32,6 +37,10 @@ export interface AgentRecord {
   engineModel?: string;
   /** While asleep (usage limit reached): when to try again. */
   sleepUntil?: number;
+  /** "manager" triages tickets and hands them out. Everyone else does the work. */
+  kind?: "manager";
+  /** What this agent is good at, in a few words. The Manager chooses by role and skills. */
+  skills?: string;
 }
 
 export interface OfficeOptions {
@@ -44,6 +53,10 @@ export interface OfficeOptions {
   claude?: { command?: string; commandArgs?: string[]; timeoutMs?: number };
   /** How long an agent rests after a usage limit with no reset time given. Default 30 minutes. */
   restMs?: number;
+  /** Start tickets on their own (the real host does; tests drive the dispatcher by hand). Default false. */
+  autoDispatch?: boolean;
+  /** How many agents may work at once. Default 2. */
+  maxParallel?: number;
 }
 
 /** An MCP connection. Holds no secrets: the credential lives in the vault under `credentialHandle`. */
@@ -79,6 +92,8 @@ export class Office {
   readonly pairing: PairingManager;
   readonly nonces = new NonceCache();
   readonly reviews: ToolReviews;
+  readonly tickets: TicketStore;
+  readonly dispatcher: Dispatcher;
   private readonly mcp = new Map<string, McpToolServer>();
   private mcpRecords: McpConnectionRecord[] = [];
   readonly projects = new Map<string, { id: string; name: string }>();
@@ -102,12 +117,16 @@ export class Office {
     this.approvals = new ApprovalQueue(10 * 60_000, now);
     this.trust = new TrustStore(join(opts.home, "trusted-devices.json"));
     this.reviews = new ToolReviews(join(opts.home, "tool-reviews.json"));
+    this.tickets = new TicketStore(join(opts.home, "tickets.json"), now);
+    this.tickets.recoverAfterRestart();
+    this.dispatcher = new Dispatcher(this, { maxParallel: opts.maxParallel });
     this.pairing = new PairingManager(this.trust, signer.publicKey, now);
     this.gateway = new ToolGateway({
       broker: this.broker, audit: this.audit, approvals: this.approvals, now,
       agentCtx: (id) => this.agentCtx(id),
     });
     this.loadState();
+    for (const p of this.projects.keys()) this.registerTeam(p);
   }
 
   static async open(opts: OfficeOptions): Promise<Office> {
@@ -154,7 +173,35 @@ export class Office {
 
   addProject(id: string, name: string): void {
     this.projects.set(id, { id, name });
+    this.registerTeam(id);
     this.saveState();
+  }
+
+  /** Every project gets the internal "team" connection the Manager works through. It holds no credential. */
+  private registerTeam(projectId: string): void {
+    this.gateway.addConnection({ id: TEAM_CONNECTION, projectId, service: "Agent Office", label: "team", server: new TeamServer(projectId, this) });
+  }
+
+  managerFor(projectId: string): AgentRecord | undefined {
+    return [...this.agents.values()].find((a) => a.kind === "manager" && a.projectId === projectId);
+  }
+
+  /** Adds the project's Manager if it has none. It starts on the cheapest model and can only use the two team tools. */
+  ensureManager(projectId: string): AgentRecord {
+    if (!this.projects.has(projectId)) throw new Error(`unknown project ${projectId}`);
+    const existing = this.managerFor(projectId);
+    if (existing) return existing;
+    const id = `manager-${projectId}`;
+    this.addAgent({ id, name: "Manager", role: "Manager", projectId, mode: "risky", model: "small", kind: "manager", engine: "claude-code", engineModel: "haiku", skills: "triage and delegation" });
+    this.addGrant({ id: `g-team-${id}`, projectId, agentId: id, connectionId: TEAM_CONNECTION, tools: TEAM_TOOLS, resources: [] });
+    return this.agents.get(id)!;
+  }
+
+  /** The user's answer to an approval. A ticket that was paused for it continues once all its answers are in. */
+  async resolveApproval(id: string, approve: boolean, by: string) {
+    const r = await this.gateway.resolveApproval(id, approve, by);
+    this.dispatcher.approvalResolved(id, r);
+    return r;
   }
 
   addAgent(a: Omit<AgentRecord, "status" | "tokensToday"> & Partial<Pick<AgentRecord, "status" | "tokensToday">>): void {
@@ -233,6 +280,30 @@ export class Office {
     return s;
   }
 
+  /** The saved connections, without anything secret: the credential stays in the vault under its handle. */
+  listConnections(projectId?: string): { id: string; projectId: string; service: string; label: string; kind: string; hasCredential: boolean; connected: boolean }[] {
+    return this.mcpRecords
+      .filter((c) => !projectId || c.projectId === projectId)
+      .map((c) => ({ id: c.id, projectId: c.projectId, service: c.service, label: c.label, kind: c.spec.kind, hasCredential: Boolean(c.credentialHandle), connected: this.mcp.get(this.mcpKey(c.projectId, c.id))?.isConnected ?? false }));
+  }
+
+  /** Asks the server for its tools again. A definition that changed since you reviewed it goes back to unreviewed. */
+  async refreshConnection(projectId: string, connectionId: string): Promise<DiscoveredTool[]> {
+    const s = this.mcpServer(projectId, connectionId);
+    await s.refresh();
+    return s.discovered();
+  }
+
+  /** Removes a connection, its grants and reviews. Its credential is deleted too unless another connection in the project uses it. */
+  async removeConnectionAndSecret(projectId: string, id: string): Promise<{ credentialDeleted: boolean }> {
+    const rec = this.mcpRecords.find((r) => r.projectId === projectId && r.id === id);
+    if (!rec) throw new Error("unknown connection");
+    await this.removeMcpConnection(projectId, id);
+    const shared = rec.credentialHandle && this.mcpRecords.some((r) => r.projectId === projectId && r.credentialHandle === rec.credentialHandle);
+    if (rec.credentialHandle && !shared) { this.vault.delete(projectId, rec.credentialHandle); return { credentialDeleted: true }; }
+    return { credentialDeleted: false };
+  }
+
   discoveredTools(projectId: string, connectionId: string): DiscoveredTool[] {
     return this.mcpServer(projectId, connectionId).discovered();
   }
@@ -300,7 +371,9 @@ export class Office {
     }
     if (outcome.status === "rate_limited") {
       a.status = "asleep";
-      a.sleepUntil = outcome.resetAt ?? (this.opts.now?.() ?? Date.now()) + (this.opts.restMs ?? 30 * 60_000);
+      // A reset time that is already past (clock skew, or a stale message) must not make the agent retry at once and hammer a limit it just hit.
+      const t = this.opts.now?.() ?? Date.now();
+      a.sleepUntil = outcome.resetAt && outcome.resetAt > t ? outcome.resetAt : t + (this.opts.restMs ?? 30 * 60_000);
     } else {
       a.status = "idle";
     }
@@ -323,6 +396,7 @@ export class Office {
   }
 
   async close(): Promise<void> {
+    await this.dispatcher.shutdown();
     await Promise.all([...this.mcp.values()].map((s) => s.close()));
     this.mcp.clear();
   }
@@ -343,6 +417,7 @@ export class Office {
       agents: { total: agents.length, working: agents.filter((a) => a.status === "working").length, waiting: waiting.size },
       pendingApprovals: this.approvals.pending().length,
       tokensToday: agents.reduce((n, a) => n + a.tokensToday, 0),
+      tickets: this.tickets.counts(),
       projects: [...this.projects.values()].map((p) => ({ id: p.id, name: p.name, agents: agents.filter((a) => a.projectId === p.id).length })),
     };
   }
@@ -390,7 +465,7 @@ export class Office {
         }));
       case "approval.resolve": {
         const a = z.object({ approvalId: z.string(), approve: z.boolean() }).parse(payload);
-        return this.gateway.resolveApproval(a.approvalId, a.approve, deviceId);
+        return this.resolveApproval(a.approvalId, a.approve, deviceId);
       }
       case "tools.discovered": {
         const a = z.object({ projectId: z.string(), connectionId: z.string() }).parse(payload);
@@ -408,8 +483,13 @@ export class Office {
         if (!this.trust.revoke(a.deviceId)) throw new Error("unknown device");
         return { revoked: a.deviceId };
       }
-      default:
-        throw new Error("unknown_command");
+      default: {
+        const r = (await handleTeamCommand(this, type, payload, deviceId));
+        if (r.handled) return r.result;
+        const t = await handleToolsCommand(this, type, payload, deviceId);
+        if (!t.handled) throw new Error("unknown_command");
+        return t.result;
+      }
     }
   }
 }

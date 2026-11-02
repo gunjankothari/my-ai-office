@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import {
-  fingerprint, pairingProof, signCommand, verifyObject, verifyPairingProof,
-  type CommandReplyBody,
-} from "@agent-office/shared";
+import { fingerprint, pairingProof, verifyPairingProof } from "@agent-office/shared";
 import { getDevice, getPinnedHosts, pinHost, type Device } from "./lib/device";
 import { HubClient, type OfficeInfo } from "./lib/hub";
+import { officeRunner } from "./lib/commands";
+import { OfficeView } from "./OfficeView";
 
 // Served by the hub itself in production, so the hub is simply this site. In development the web app runs on 5173 and the hub on 8787.
 const DEFAULT_HUB = import.meta.env.VITE_HUB_URL ?? (location.port === "5173" ? "http://localhost:8787" : location.origin);
@@ -23,6 +22,7 @@ export function App() {
   const officesRef = useRef<OfficeInfo[]>([]);
   officesRef.current = offices;
   const [error, setError] = useState("");
+  const [openId, setOpenId] = useState<string | null>(null);
 
   useEffect(() => {
     void getDevice().then(setDevice);
@@ -77,6 +77,14 @@ export function App() {
       <main>
         {!hub ? (
           <ConnectForm onConnect={connect} error={error} />
+        ) : openId && offices.find((o) => o.id === openId) ? (
+          <OfficeView
+            office={offices.find((o) => o.id === openId)!}
+            hub={hub}
+            device={device}
+            pinnedKey={pinned[openId]}
+            onBack={() => setOpenId(null)}
+          />
         ) : (
           <>
             <h1>Offices</h1>
@@ -91,6 +99,7 @@ export function App() {
                   device={device}
                   pinnedKey={pinned[o.id]}
                   onPinned={(k) => setPinned((p) => ({ ...p, [o.id]: k }))}
+                  onOpen={() => setOpenId(o.id)}
                 />
               ))}
               {offices.length === 0 && <div className="empty">No offices yet. Add one, then run the Office Host on that machine.</div>}
@@ -154,7 +163,7 @@ function AddOffice({ hub, onCreated }: { hub: HubClient; onCreated: () => void }
 
 type Approval = { id: string; agent: string; summary: string; risk: string; reason: string };
 
-function OfficeCard(p: { office: OfficeInfo; hub: HubClient; device: Device | null; pinnedKey: string | undefined; onPinned: (k: string) => void }) {
+function OfficeCard(p: { office: OfficeInfo; hub: HubClient; device: Device | null; pinnedKey: string | undefined; onPinned: (k: string) => void; onOpen: () => void }) {
   const { office: o, hub, device, pinnedKey } = p;
   const [code, setCode] = useState("");
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -162,14 +171,7 @@ function OfficeCard(p: { office: OfficeInfo; hub: HubClient; device: Device | nu
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const st = o.status;
 
-  const run = useCallback(async <T,>(type: string, payload: Record<string, unknown> = {}): Promise<T> => {
-    if (!device || !pinnedKey) throw new Error("Pair this device first.");
-    const cmd = await signCommand(device.signer, device.deviceId, o.id, { type, payload });
-    const env = await hub.request<{ body: CommandReplyBody; sig: string }>(o.id, cmd, cmd.nonce);
-    if (!(await verifyObject(pinnedKey, env))) throw new Error("That reply was not signed by this office's host, so it was ignored.");
-    if (!env.body.ok) throw new Error(env.body.error ?? "The office refused the command.");
-    return env.body.result as T;
-  }, [device, hub, o.id, pinnedKey]);
+  const run = useMemo(() => officeRunner(hub, device, o.id, pinnedKey), [device, hub, o.id, pinnedKey]);
 
   const guard = async (fn: () => Promise<void>) => {
     setMsg(null);
@@ -217,6 +219,7 @@ function OfficeCard(p: { office: OfficeInfo; hub: HubClient; device: Device | nu
           <div><dt>Working</dt><dd>{st.agents.working} / {st.agents.total}</dd></div>
           <div><dt>Waiting for you</dt><dd>{st.pendingApprovals}</dd></div>
           <div><dt>Tokens today</dt><dd>{st.tokensToday.toLocaleString()}</dd></div>
+          {st.tickets && <div><dt>Open tickets</dt><dd>{st.tickets.open}</dd></div>}
         </dl>
       )}
       {st && st.projects.length > 0 && <ul className="projects">{st.projects.map((pr) => <li key={pr.id}>{pr.name}<span className="muted">{pr.agents} agents</span></li>)}</ul>}
@@ -233,6 +236,7 @@ function OfficeCard(p: { office: OfficeInfo; hub: HubClient; device: Device | nu
         <>
           <p className="muted">Paired. Host key fingerprint: <code>{fp}</code></p>
           <div className="btns">
+            <button className="primary" disabled={!o.online} onClick={p.onOpen}>Open office</button>
             <button className="ghost" disabled={!o.online} onClick={() => void guard(async () => { const r = await run<{ officeName: string }>("ping"); setMsg({ kind: "ok", text: `${r.officeName} answered and the reply was signed by its host.` }); })}>Send test command</button>
             <button className="ghost" disabled={!o.online} onClick={() => void loadApprovals()}>Refresh approvals</button>
           </div>

@@ -2,7 +2,7 @@
 
 A control room for AI agents you run on your own machines, with credentials that never reach the model. The full product plan is in [`docs/PLAN.md`](docs/PLAN.md). The clickable UI prototype is [`docs/ui-prototype.html`](docs/ui-prototype.html) (a page fragment; it is also published as an artifact).
 
-This repository is **Phase 1, the engine**: the parts that make the security model real. The office, tickets, Manager and Communicator screens from the prototype come next.
+This repository has the engine (vault, credential broker, policy, signed commands, MCP tools, the Claude Code engine), the cloud hub, and **tickets with a Manager** (Phase 3). The Communicator, the office view, Skill Studio and the tool review screens from the prototype come next.
 
 ## Layout
 
@@ -50,6 +50,15 @@ The host prints a one-time **pairing code** and its **key fingerprint**. Type th
 
 State lives in `~/.agent-office` on the host (override with `AGENT_OFFICE_HOME`) and in `hub.db` for the hub.
 
+## Tickets and the Manager
+
+Open an office in the web app: the **Team** tab adds projects, teammates (name, role, and a few words of skills) and a **Manager**. The **Tools** tab reviews what each connected service's tools can do and gives teammates access ([`docs/TOOLS.md`](docs/TOOLS.md)). The **Tickets** tab creates tickets, either given to someone yourself or left for the Manager. Details: [`docs/TICKETS.md`](docs/TICKETS.md).
+
+- A new ticket goes to the project's Manager, who reads the team's roles and skills and either **assigns** it or **asks you one question**. It works through two tools only, so it cannot do the work or touch anything else.
+- The assigned agent runs it on your own Claude Code sign-in. A risky action pauses the ticket under **Needs you** until you approve it, then the ticket carries on.
+- Every ticket shows **who worked on it**, a timeline, and tokens and API-equivalent cost per person and in total.
+- Ticket text stays on your machine. The cloud hub only learns how many tickets are open, working, and waiting for you.
+
 ## Trying GitHub
 
 ```bash
@@ -90,7 +99,7 @@ Remote servers use `spec: { kind: "http", url: "https://..." }` and receive the 
 ## Tests
 
 ```bash
-npm test            # 117 tests across shared, host (real MCP servers, a stand-in for Claude Code) and hub
+npm test            # 144 tests across shared, host (real MCP servers, a stand-in for Claude Code) and hub
 npm run typecheck   # all four packages
 ```
 
@@ -129,8 +138,10 @@ A separate live run (real hub and host processes, real Chromium) pairs a device,
 | OAuth for remote MCP servers (the SDK's `authProvider` hook, tokens stored in the vault) | Not started. Static tokens and API keys work today |
 | API engine with real model providers (Anthropic, OpenAI, local, LiteLLM) | Not started. `ModelProvider` interface and a scripted test provider exist. The Claude Code engine covers Anthropic on a subscription; OpenAI's Codex CLI would be a second engine of the same kind |
 | **Sandboxed execution** (containers, egress allowlist) for MCP server processes | Not started. A stdio server currently runs as a normal child process with a trimmed environment |
-| Connections UI, tool review screen, grants UI, Connectors catalog | Prototype only. The host already exposes `tools.discovered` and `tools.review` as signed commands for the review screen |
-| Tickets, Manager, Communicator, task threads | Prototype only |
+| Tools screen: connections, tool review pinned to the definition you saw, access with resource limits and expiry, removal | Done and tested, including in a real browser. See [`docs/TOOLS.md`](docs/TOOLS.md). Adding a connection still happens on the office machine (`npm run github`), because a token must not pass through the hub |
+| Connectors catalog, sealed token entry from the browser | Not started |
+| Tickets, Manager (assign or ask), per-person tokens and cost, approvals inside tickets, Tickets and Team screens | Done and tested, including a real browser against a real hub and host with a stand-in for Claude Code. **Not yet run with a real signed-in Claude Code as the Manager** |
+| Communicator (Slack, Teams, mail), sub-tickets, ticket threads with attachments | Not started |
 | Office view, XP, Skill Studio | Prototype only |
 | Passkey sign-in | Not started. The hub uses one admin token (long and random, sent as the first message of the live connection, never in an address) |
 | Push notifications, native mobile app | Not started |

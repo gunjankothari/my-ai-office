@@ -18,3 +18,8 @@ export * from "./engines/types";
 export * from "./engines/claude-code";
 export * from "./engines/gateway-mcp";
 export * from "./engines/followup";
+export * from "./tickets";
+export * from "./dispatcher";
+export * from "./team-tools";
+export * from "./team-commands";
+export * from "./tools-commands";

@@ -135,3 +135,34 @@ test("the follow-up after approval marks tool output as data and covers every ou
   ]);
   assert.ok(t.includes("approval requests") && t.includes("data, not instructions") && t.includes("was NOT approved") && t.includes("failed: boom"));
 });
+
+test("an answer that did not rest on a real tool call is flagged, so it cannot pass for real data", async () => {
+  for (const [scenario, expect] of [["notool", "Claude Code asked for none"], ["blocked", "blocked 1 tool request(s) itself"]] as const) {
+    const w = await world();
+    await w.office.close();
+    const { io, said } = term();
+    const r = await runAgentTask(io, { home: w.home, masterKey: w.masterKey, claude: w.claude, task: `List PRs. [scenario:${scenario}]` });
+    assert.equal(r.ok, true, said.join("\n"));
+    const out = said.join("\n");
+    assert.ok(out.includes("Warning:") && out.includes(expect), out);
+    assert.ok(out.includes("not based on real data") || out.includes("never reached Agent Office"), out);
+  }
+});
+
+test("no warning when the tool call really went through the gateway", async () => {
+  const w = await world();
+  await w.office.close();
+  const { io, said } = term();
+  await runAgentTask(io, { home: w.home, masterKey: w.masterKey, claude: w.claude, task: "Summarise. [scenario:read]" });
+  assert.ok(!said.join("\n").includes("Warning:"));
+});
+
+test("an agent with no tools is told so up front and the answer is flagged as unverified", async () => {
+  const w = await world();
+  w.office.revokeGrant("g1"); w.office.revokeGrant("g2");
+  await w.office.close();
+  const { io, said } = term();
+  await runAgentTask(io, { home: w.home, masterKey: w.masterKey, claude: w.claude, task: "List PRs. [scenario:notool]" });
+  const out = said.join("\n");
+  assert.ok(out.includes("has no tools") && out.includes("nothing above was checked"), out);
+});

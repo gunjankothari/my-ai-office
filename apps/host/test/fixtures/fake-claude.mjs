@@ -30,7 +30,8 @@ if (!cfg || cfg.type !== "http") die("bad mcp config");
 let prompt = "";
 for await (const c of process.stdin) prompt += c;
 const resumed = val("--resume");
-const scenario = /\[scenario:([a-z_]+)\]/.exec(prompt)?.[1] ?? (resumed ? "resume" : "read");
+const triage = prompt.startsWith("You are triaging ticket");
+const scenario = triage ? "triage" : (/\[scenario:([a-z_]+)\]/.exec(prompt)?.[1] ?? (resumed ? "resume" : "read"));
 const sessionId = resumed ?? "sess-" + Math.random().toString(36).slice(2, 10);
 const sleepForever = () => setInterval(() => {}, 1000);
 const result = (text, extra = {}) => out({ type: "result", subtype: "success", is_error: false, result: text, session_id: sessionId, total_cost_usd: 0.0123, usage: { input_tokens: 100, output_tokens: 20 }, ...extra });
@@ -62,6 +63,33 @@ switch (scenario) {
     result(`I am waiting for approval. (${text.slice(0, 40)})`);
     break;
   }
+  case "triage": {
+    // Plays the Manager. The ticket text steers it: [to:agent] assigns, [ask:question] asks the user, [silent] does neither.
+    const ticketId = /triaging ticket (T-\d+)/.exec(prompt)?.[1];
+    const answered = prompt.split("The user answered your earlier question:")[1];
+    const to = /\[to:([a-z0-9_-]+)\]/.exec(answered ?? prompt)?.[1];
+    const ask = answered ? undefined : /\[ask:([^\]]+)\]/.exec(prompt)?.[1];
+    const names = (await client.listTools()).tools.map((t) => t.name).sort().join(",");
+    let said = "silent";
+    if (!prompt.includes("[silent]")) {
+      if (ask) said = await call("team__ask_user", { ticketId, question: ask });
+      else if (to) said = await call("team__assign_ticket", { ticketId, agentId: to, note: "best fit" });
+    }
+    result(`TRIAGE tools=${names} -> ${said}`);
+    break;
+  }
+  case "notool": {
+    // The model writes an answer as if it had data, but never asks for a tool.
+    out({ type: "assistant", message: { content: [{ type: "text", text: "The tool results will be available shortly." }] }, session_id: sessionId });
+    result("The tool results will be available shortly.");
+    break;
+  }
+  case "blocked": {
+    // The model asks for a tool, but Claude Code's own permission system blocks it before our server hears of it.
+    out({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "mcp__office__github__list_pull_requests", input: {} }] }, session_id: sessionId });
+    result("I could not read the pull requests.", { permission_denials: [{ tool_name: "mcp__office__github__list_pull_requests", tool_use_id: "t1", tool_input: {} }] });
+    break;
+  }
   case "resume": result(`RESUMED=${resumed} PROMPT=${prompt.slice(0, 200)}`); break;
   case "ratelimit": retry("rate_limit", 2); sleepForever(); break;
   case "ratelimit_result": result("Claude usage limit reached|1893456000", { is_error: true, subtype: "error_during_execution" }); process.exitCode = 1; break;
@@ -74,4 +102,4 @@ switch (scenario) {
   case "garbage": console.log("this is not json"); console.log("{broken"); console.log(JSON.stringify({ no_type: true })); result("survived noise"); break;
   default: die("unknown scenario " + scenario);
 }
-if (["read", "approval", "resume", "ratelimit_result", "signedout_result", "garbage"].includes(scenario)) { await client?.close(); }
+if (["read", "approval", "resume", "triage", "notool", "blocked", "ratelimit_result", "signedout_result", "garbage"].includes(scenario)) { await client?.close(); }

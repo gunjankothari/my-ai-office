@@ -11,7 +11,7 @@ const home = process.env.AGENT_OFFICE_HOME ?? join(homedir(), ".agent-office");
 const name = process.env.OFFICE_NAME ?? hostname();
 const hubUrl = process.env.HUB_URL ?? "ws://127.0.0.1:8787";
 
-const office = await Office.open({ home, name, masterKey: loadMasterKey(home) });
+const office = await Office.open({ home, name, masterKey: loadMasterKey(home), autoDispatch: true, maxParallel: Number(process.env.MAX_PARALLEL ?? 2) });
 if (process.argv.includes("--demo")) await seedDemo(office);
 
 const link = new HostLink({
@@ -22,6 +22,7 @@ const link = new HostLink({
   log: (m) => console.log(`[host] ${m}`),
 });
 link.start();
+office.dispatcher.start();
 
 console.log(`[host] office "${name}", home ${home}`);
 console.log(`[host] host key fingerprint: ${await fingerprint(office.publicKey)}`);
@@ -40,4 +41,4 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   else if (cmd === "quit") void link.stop().then(() => process.exit(0));
 });
 
-for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => void link.stop().then(() => process.exit(0)));
+for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => void link.stop().then(() => office.close()).then(() => process.exit(0)));

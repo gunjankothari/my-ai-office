@@ -35,6 +35,16 @@ export interface AgentRunResult { ok: boolean; status: EngineOutcome["status"] |
 
 const usd = (n?: number) => (n === undefined ? "" : ` Claude Code estimates this would cost about $${n.toFixed(4)} on the pay-per-use API. On your plan it is covered by the flat fee, within its usage limits.`);
 
+/** Says so when the answer cannot be trusted to rest on real tool results. */
+export function explainOddRun(d: { toolUses: string[]; permissionDenials: string[] } | undefined, gatewayCalls: number, grantedTools: number): string[] {
+  const w: string[] = [];
+  if (grantedTools === 0) w.push("This agent has no tools, so nothing above was checked against GitHub or any other system. Treat any facts in it as unverified. Run `npm run github` to connect GitHub and grant Ada a tool.");
+  if (!d) return w;
+  if (d.permissionDenials.length) w.push(`Claude Code blocked ${d.permissionDenials.length} tool request(s) itself: ${[...new Set(d.permissionDenials)].join(", ")}. Those never reached Agent Office, so the answer above is not based on them.`);
+  if (grantedTools > 0 && gatewayCalls === 0) w.push(`The agent has ${grantedTools} granted tool(s) but no tool call reached Agent Office${d.toolUses.length ? ` (Claude Code asked for: ${d.toolUses.join(", ")})` : " (Claude Code asked for none)"}. Treat the answer above as unverified: it was not based on real data.`);
+  return w;
+}
+
 export async function runAgentTask(io: RunIO, o: AgentRunOptions): Promise<AgentRunResult> {
   const office = await Office.open({ home: o.home, name: "Agent run", masterKey: o.masterKey, claude: o.claude, now: o.now, restMs: o.restMs });
   try {
@@ -50,10 +60,12 @@ export async function runAgentTask(io: RunIO, o: AgentRunOptions): Promise<Agent
     const tools = office.gateway.listTools(agentId);
     io.say(`${agent.name} will work with your own Claude Code sign-in. No API key is used.`);
     if ((o.env ?? process.env).ANTHROPIC_API_KEY) io.say("Note: ANTHROPIC_API_KEY is set in your shell. It is not passed to Claude Code, so your subscription is what gets used.");
+    if (!tools.length) io.say(`Heads up: ${agent.name} has no tools, so she cannot look anything up. She can only answer from what you write.`);
     io.say(tools.length ? `Tools ${agent.name} may use: ${tools.map((t) => `${t.connectionId}/${t.name}`).join(", ")}` : `${agent.name} has no tools granted, so can only answer from what you write.`);
     io.say("");
 
-    const track = (e: RunEvent) => { if (e.type === "tool.called") io.say(`  . ${e.connectionId}/${e.tool}: ${e.outcome}`); };
+    let gatewayCalls = 0;
+    const track = (e: RunEvent) => { if (e.type === "tool.called") { gatewayCalls++; io.say(`  . ${e.connectionId}/${e.tool}: ${e.outcome}`); } };
 
     let outcome: EngineOutcome;
     try {
@@ -78,6 +90,7 @@ export async function runAgentTask(io: RunIO, o: AgentRunOptions): Promise<Agent
     switch (outcome.status) {
       case "finished":
         io.say(`${agent.name}:\n${outcome.text}\n`);
+        for (const w of explainOddRun(outcome.diagnostics, gatewayCalls, tools.length)) io.say(`Warning: ${w}`);
         io.say(`Done.${usd(outcome.equivalentCostUsd)}`);
         return { ok: true, status: "finished", text: outcome.text };
       case "waiting_approval":

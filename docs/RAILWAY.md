@@ -83,6 +83,13 @@ The first run prints a one-time pairing code. Type it into the page under "Pair 
 - **The token is not in any web address.** The page sends it as the first message on the live connection, so it does not appear in logs.
 - **Logs and the database** contain office names, public keys and status counts. No secrets.
 
+## What happened on the first real deploy
+
+- The `Dockerfile` built on Railway without changes, and the volume mounted at `/data`.
+- A variable added through Railway's tools (or the dashboard's "staged changes") is **not live until you deploy the staged changes**. The first deploy started without `HUB_ADMIN_TOKEN` and the hub exited with its "Set HUB_ADMIN_TOKEN" message. After the staged change was applied, the next deploy succeeded. If you see that message in the logs, look for a pending staged change first.
+- Generate the domain **before** the first deploy, so the hub learns its own address (`RAILWAY_PUBLIC_DOMAIN`) from the start. If you add the domain later, redeploy once.
+- Healthy start-up looks like: `hub listening on 8080` and `database: /data/hub.db, serving the web app from /app/apps/web/dist`, with no `WARNING` line. The `ExperimentalWarning: SQLite` line is normal.
+
 ## What has been checked, and what has not
 
 Checked: `npm ci` from the lockfile and the production build in a clean copy (the same steps as the Dockerfile), then the hub started with the container's settings and driven by a real browser: sign-in (including a wrong token), adding an office, enrolling a machine through it, pairing, a signed command, an approval, reload, deep links, no content-security-policy violations, no token in the log, and path-traversal attempts refused. The start-up warnings for a missing or misplaced volume were exercised.

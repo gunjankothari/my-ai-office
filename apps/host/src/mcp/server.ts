@@ -170,6 +170,8 @@ export class McpToolServer implements ToolServer {
     return this.raw.find((t) => t.name === tool)?.inputSchema;
   }
 
+  get isConnected(): boolean { return this.connected; }
+
   /** For the review screen. */
   discovered(): DiscoveredTool[] {
     const entries = this.o.reviews.get(this.o.projectId, this.o.connectionId);
