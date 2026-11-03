@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import type { Ticket, TicketStatus, TicketUsage } from "@agent-office/shared";
+import { ROLE_TEMPLATES, type RoleTemplate, type Ticket, type TicketStatus, type TicketUsage } from "@agent-office/shared";
 import type { Device } from "./lib/device";
 import type { HubClient, OfficeInfo } from "./lib/hub";
 import { officeRunner, type Runner } from "./lib/commands";
@@ -9,7 +9,7 @@ type Summary = Pick<Ticket, "id" | "projectId" | "title" | "status" | "priority"
   rolledUp?: TicketUsage; subtickets?: number; blockedBy?: string;
 };
 type Detailed = Ticket & { rolledUp: TicketUsage; subtickets: Summary[]; blockedBy?: string };
-interface Member { id: string; name: string; role: string; skills?: string; projectId: string; status: string; kind?: string; tokensToday: number; hasEngine: boolean; openTickets: number; sleepUntil?: number }
+interface Member { id: string; name: string; role: string; skills?: string; projectId: string; status: string; kind?: string; tokensToday: number; hasEngine: boolean; openTickets: number; sleepUntil?: number; paused?: boolean; mode?: "every" | "risky" | "dry"; engineModel?: string }
 interface Team { projects: { id: string; name: string }[]; agents: Member[] }
 interface Approval { id: string; agent: string; summary: string; risk: string; reason: string }
 
@@ -394,6 +394,7 @@ const VERB: Record<string, string> = {
 
 function TeamTab({ run, team, reload }: { run: Runner; team: Team; reload: () => Promise<void> }) {
   const [msg, setMsg] = useState("");
+  const [open, setOpen] = useState<string | null>(null);
   const act = async (fn: () => Promise<unknown>) => { setMsg(""); try { await fn(); await reload(); } catch (e) { setMsg((e as Error).message); } };
   return (
     <>
@@ -408,15 +409,18 @@ function TeamTab({ run, team, reload }: { run: Runner; team: Team; reload: () =>
             {!hasManager && <p className="muted">Without a Manager you give each ticket to someone yourself.</p>}
             <ul className="roster">
               {members.map((m) => (
-                <li key={m.id}>
-                  <span className="avatar" aria-hidden="true">{m.name.slice(0, 1)}</span>
-                  <span className="who"><b>{m.name}</b> <span className="muted">{m.role}{m.skills ? ` · ${m.skills}` : ""}</span></span>
-                  <span className={"chip" + (m.status === "working" ? " tone-work" : "")}>{m.status === "asleep" ? "Resting" : m.status === "working" ? "Working" : "Free"}</span>
-                  <span className="muted small">{m.openTickets} open · {m.tokensToday.toLocaleString()} tokens today</span>
+                <li key={m.id} className={open === m.id ? "open" : ""}>
+                  <button className="rowbtn" onClick={() => setOpen(open === m.id ? null : m.id)} aria-expanded={open === m.id}>
+                    <span className="avatar" aria-hidden="true">{m.name.slice(0, 1)}</span>
+                    <span className="who"><b>{m.name}</b> <span className="muted">{m.role}{m.skills ? ` · ${m.skills}` : ""}</span></span>
+                    <span className={"chip" + (m.paused ? "" : m.status === "working" ? " tone-work" : "")}>{m.paused ? "Paused" : m.status === "asleep" ? "Resting" : m.status === "working" ? "Working" : "Free"}</span>
+                    <span className="muted small">{m.openTickets} open · {m.tokensToday.toLocaleString()} tokens today</span>
+                  </button>
+                  {open === m.id && <AgentPanel id={m.id} run={run} reload={reload} onGone={() => setOpen(null)} />}
                 </li>
               ))}
             </ul>
-            <AddAgent run={run} projectId={pr.id} onDone={reload} />
+            <Hire run={run} projectId={pr.id} onDone={reload} />
           </section>
         );
       })}
@@ -439,20 +443,128 @@ function AddProject({ run, onDone }: { run: Runner; onDone: () => Promise<void> 
   );
 }
 
-function AddAgent({ run, projectId, onDone }: { run: Runner; projectId: string; onDone: () => Promise<void> }) {
+function Hire({ run, projectId, onDone }: { run: Runner; projectId: string; onDone: () => Promise<void> }) {
   const [open, setOpen] = useState(false);
-  const [name, setName] = useState(""); const [role, setRole] = useState(""); const [skills, setSkills] = useState(""); const [err, setErr] = useState("");
-  if (!open) return <button className="ghost" onClick={() => setOpen(true)}>Add a teammate</button>;
+  const [tpl, setTpl] = useState<RoleTemplate | null>(null);
+  const [name, setName] = useState(""); const [role, setRole] = useState(""); const [skills, setSkills] = useState("");
+  const [mode, setMode] = useState<"every" | "risky" | "dry">("risky"); const [model, setModel] = useState("");
+  const [err, setErr] = useState("");
+  if (!open) return <button className="ghost" onClick={() => setOpen(true)}>Hire a teammate</button>;
+
+  const pick = (t: RoleTemplate | null) => {
+    setTpl(t);
+    setRole(t?.role ?? ""); setSkills(t?.skills ?? ""); setMode(t?.mode ?? "risky"); setModel(t?.engineModel ?? "");
+  };
+  const reset = () => { setOpen(false); pick(null); setName(""); setErr(""); };
   return (
-    <form className="note" onSubmit={(e) => { e.preventDefault(); setErr(""); void run("agents.add", { id: slug(name), name, role, skills: skills || undefined, projectId }).then(() => { setOpen(false); setName(""); setRole(""); setSkills(""); return onDone(); }).catch((x) => setErr((x as Error).message)); }}>
+    <form className="note" onSubmit={(e) => { e.preventDefault(); setErr(""); void run("agents.add", { id: slug(name), name, role, skills: skills || undefined, mode, engineModel: model || undefined, projectId }).then(() => { reset(); return onDone(); }).catch((x) => setErr((x as Error).message)); }}>
+      <h3>Hire a teammate</h3>
+      <p className="muted">Pick a starting point, change anything you like. A new teammate always starts with <b>no access to any tool</b>. You give access on the Tools tab.</p>
+      <div className="templates" role="group" aria-label="Role templates">
+        {ROLE_TEMPLATES.map((t) => (
+          <button type="button" key={t.id} className={"tpl" + (tpl?.id === t.id ? " on" : "")} aria-pressed={tpl?.id === t.id} onClick={() => pick(t)}>
+            <b>{t.role}</b><span className="muted small">{t.blurb}</span>
+          </button>
+        ))}
+        <button type="button" className={"tpl" + (!tpl ? " on" : "")} aria-pressed={!tpl} onClick={() => pick(null)}><b>Something else</b><span className="muted small">Start from a blank form.</span></button>
+      </div>
       <div className="grid2">
         <div><label htmlFor={`an-${projectId}`}>Name</label><input id={`an-${projectId}`} value={name} onChange={(e) => setName(e.target.value)} required maxLength={40} /></div>
         <div><label htmlFor={`ar-${projectId}`}>Role</label><input id={`ar-${projectId}`} value={role} onChange={(e) => setRole(e.target.value)} placeholder="Developer, DevOps, Marketer…" required maxLength={60} /></div>
       </div>
       <label htmlFor={`as-${projectId}`}>Skills, in a few words (the Manager picks by these)</label>
       <input id={`as-${projectId}`} value={skills} onChange={(e) => setSkills(e.target.value)} maxLength={300} placeholder="typescript, code review, github" />
+      <div className="grid2">
+        <div><label htmlFor={`am-${projectId}`}>Approvals</label><ModeSelect id={`am-${projectId}`} value={mode} onChange={setMode} /></div>
+        <div><label htmlFor={`ae-${projectId}`}>Claude model</label><input id={`ae-${projectId}`} value={model} onChange={(e) => setModel(e.target.value)} placeholder="sonnet, haiku (blank: Claude Code's default)" maxLength={40} /></div>
+      </div>
       {err && <p className="err" role="alert">{err}</p>}
-      <div className="btns"><button className="primary" disabled={!slug(name)}>Add</button><button type="button" className="ghost" onClick={() => setOpen(false)}>Cancel</button></div>
+      <div className="btns"><button className="primary" disabled={!slug(name)}>Hire</button><button type="button" className="ghost" onClick={reset}>Cancel</button></div>
     </form>
+  );
+}
+
+const MODES: { id: "every" | "risky" | "dry"; label: string; help: string }[] = [
+  { id: "risky", label: "Normal", help: "Reads and ordinary changes run on their own. Destructive actions and anything that sends a message out ask you first." },
+  { id: "every", label: "Ask before every action", help: "Everything that is not a plain read asks you first. Good for a new teammate." },
+  { id: "dry", label: "Dry run", help: "Reads run. Anything that would change something is only described, never done." },
+];
+
+function ModeSelect({ id, value, onChange }: { id: string; value: "every" | "risky" | "dry"; onChange: (m: "every" | "risky" | "dry") => void }) {
+  return <select id={id} value={value} onChange={(e) => onChange(e.target.value as "every" | "risky" | "dry")}>{MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</select>;
+}
+
+interface AgentDetail {
+  id: string; name: string; role: string; skills?: string; projectId: string; kind?: string; mode: "every" | "risky" | "dry"; engineModel?: string;
+  status: string; paused: boolean; sleepUntil?: number; tokensToday: number; tickets: Summary[];
+  access: { grantId: string; connectionId: string; service: string; label?: string; tools: string[]; resources: string[]; expiresAt?: number; expired: boolean }[];
+  cannot: { connectionId: string; service: string; label?: string; tools: string[] }[];
+  managerTools?: string[];
+}
+
+function AgentPanel({ id, run, reload, onGone }: { id: string; run: Runner; reload: () => Promise<void>; onGone: () => void }) {
+  const [a, setA] = useState<AgentDetail | null>(null);
+  const [err, setErr] = useState("");
+  const [skills, setSkills] = useState<string | null>(null);
+  const [role, setRole] = useState<string | null>(null);
+  const refresh = useCallback(async () => { try { setA(await run<AgentDetail>("agents.get", { id })); } catch (e) { setErr((e as Error).message); } }, [run, id]);
+  useEffect(() => { void refresh(); const t = setInterval(() => void refresh(), 5000); return () => clearInterval(t); }, [refresh]);
+  if (!a) return <div className="detail muted">{err || "Loading…"}</div>;
+
+  const act = async (fn: () => Promise<unknown>) => { setErr(""); try { await fn(); await refresh(); await reload(); } catch (e) { setErr((e as Error).message); } };
+  const isManager = a.kind === "manager";
+  const mode = MODES.find((m) => m.id === a.mode)!;
+
+  return (
+    <div className="detail agent">
+      <h3>Overview</h3>
+      <p>
+        {a.paused ? "Paused: starts no new work." : a.status === "working" ? "Working now." : a.status === "asleep" ? `Resting until ${a.sleepUntil ? new Date(a.sleepUntil).toLocaleTimeString() : "later"} (usage limit).` : "Free."}
+        {" "}<span className="muted">{a.tokensToday.toLocaleString()} tokens today{a.engineModel ? ` · model ${a.engineModel}` : ""}</span>
+      </p>
+      {a.tickets.length > 0 ? <ul className="subs">{a.tickets.map((t) => <li key={t.id}><b>{t.id}</b> {t.title} <StatusChip status={t.status} /></li>)}</ul> : <p className="muted">No open tickets.</p>}
+
+      <h3>About</h3>
+      <form className="inline" onSubmit={(e) => { e.preventDefault(); void act(() => run("agents.update", { id: a.id, ...(role !== null ? { role } : {}), ...(skills !== null ? { skills } : {}) }).then(() => { setRole(null); setSkills(null); })); }}>
+        <div className="grid2">
+          <div><label htmlFor={`pr-${a.id}`}>Role</label><input id={`pr-${a.id}`} value={role ?? a.role} onChange={(e) => setRole(e.target.value)} maxLength={60} required /></div>
+          <div><label htmlFor={`ps-${a.id}`}>Skills</label><input id={`ps-${a.id}`} value={skills ?? a.skills ?? ""} onChange={(e) => setSkills(e.target.value)} maxLength={300} /></div>
+        </div>
+        <button className="ghost" disabled={role === null && skills === null}>Save</button>
+      </form>
+
+      <h3>Approvals</h3>
+      <label className="sr" htmlFor={`pm-${a.id}`}>Approval mode</label>
+      <ModeSelect id={`pm-${a.id}`} value={a.mode} onChange={(m) => void act(() => run("agents.update", { id: a.id, mode: m }))} />
+      <p className="muted small">{mode.help}</p>
+
+      <h3>Access</h3>
+      {isManager ? (
+        <p className="muted">The Manager uses only its two team tools ({a.managerTools?.join(", ")}). It has no access to anything else.</p>
+      ) : a.access.length === 0 ? (
+        <p className="muted">No access yet. Give it on the Tools tab.</p>
+      ) : (
+        <ul className="subs">
+          {a.access.map((x) => (
+            <li key={x.grantId}>
+              <b>{x.service}</b>{x.label ? <span className="muted"> ({x.label})</span> : null}: {x.tools.join(", ")}
+              {x.resources.length > 0 ? <span className="muted"> · only {x.resources.join(", ")}</span> : null}
+              {x.expiresAt ? <span className="muted"> · {x.expired ? "expired" : `until ${new Date(x.expiresAt).toLocaleString()}`}</span> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!isManager && a.cannot.length > 0 && (
+        <details className="cannot"><summary>Cannot ({a.cannot.reduce((n, c) => n + c.tools.length, 0)} tools)</summary>
+          {a.cannot.map((c) => <p key={c.connectionId} className="muted small"><b>{c.service}</b>: {c.tools.join(", ")}</p>)}
+        </details>
+      )}
+
+      {err && <p className="err" role="alert">{err}</p>}
+      <div className="btns">
+        <button className="ghost" onClick={() => void act(() => run(a.paused ? "agents.resume" : "agents.pause", { id: a.id }))}>{a.paused ? "Resume" : "Pause"}</button>
+        <button className="ghost danger" onClick={() => { if (confirm(`Fire ${a.name}? Their access is removed and open tickets go back to be handed out again. What they did stays on the tickets.`)) void act(async () => { await run("agents.fire", { id: a.id }); onGone(); }); }}>Fire</button>
+      </div>
+    </div>
   );
 }

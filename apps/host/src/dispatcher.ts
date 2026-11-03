@@ -54,7 +54,7 @@ export class Dispatcher {
   }
 
   private free(agent: AgentRecord | undefined): agent is AgentRecord {
-    if (!agent || agent.status === "working") return false;
+    if (!agent || agent.paused || agent.status === "working") return false;
     if (agent.status === "asleep" && agent.sleepUntil && this.now() < agent.sleepUntil) return false;
     return true;
   }

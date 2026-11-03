@@ -36,6 +36,13 @@ agent wants a risky action ─► "Needs you" ─► you approve ─► it carri
 - Links must point to a ticket in the same project, and can only be made at creation, so they can never form a loop.
 - The **Board** view groups tickets into New, Planning, In progress, Waiting for you and Done.
 
+## Team: hiring, pausing, firing
+
+- **Hire** from a role template (Developer, QA Reviewer, DevOps, Support, Marketer, Sales, Researcher) or a blank form. A template only fills in the form. A new teammate always has **no tool access**.
+- **Pause** stops new work for an agent. A run in progress, or one you have just approved, finishes.
+- **Fire** removes the agent and all its grants. Its queued tickets go back to the Manager. It is refused while the agent is working or waiting for your answer, because a run cut off half-way may already have had effects. History stays on the tickets and in the audit log.
+- The agent panel lists what an agent can do and, separately, the tools it **cannot** use. Names only, never credentials.
+
 ## Tokens and cost
 
 Each run's tokens and its "API value" (what the same run would cost on the pay-per-use API) are added to the ticket and to whoever did it, the Manager's triage included. On a flat Claude plan nothing extra is charged, but the runs do count against your plan's usage limit. Token counts include cached input, so they look larger than the new text you wrote.

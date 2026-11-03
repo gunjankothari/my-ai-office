@@ -3,6 +3,7 @@ import type { Ticket } from "@agent-office/shared";
 import { ApprovalMode, TicketStatus } from "@agent-office/shared";
 import type { Office } from "./office";
 import { isOpen, type TicketStore } from "./tickets";
+import { TEAM_CONNECTION } from "./team-tools";
 
 /*
  * The commands a paired device may send about tickets and the team. They arrive through the usual
@@ -105,6 +106,7 @@ export async function handleTeamCommand(office: Office, type: string, payload: R
         agents: [...office.agents.values()].filter((g) => !a.projectId || g.projectId === a.projectId).map((g) => ({
           id: g.id, name: g.name, role: g.role, skills: g.skills, projectId: g.projectId, status: g.status, kind: g.kind,
           sleepUntil: g.sleepUntil, tokensToday: g.tokensToday, hasEngine: Boolean(g.engine),
+          paused: Boolean(g.paused), mode: g.mode, engineModel: g.engineModel,
           openTickets: open.filter((t) => t.assigneeId === g.id).length,
         })),
       });
@@ -119,6 +121,49 @@ export async function handleTeamCommand(office: Office, type: string, payload: R
       if (office.projects.has(a.id)) throw new Error("a project with that id already exists");
       office.addProject(a.id, a.name);
       return ok({ id: a.id });
+    }
+    case "agents.get": {
+      const a = z.object({ id: Id }).parse(payload);
+      const g = office.agents.get(a.id);
+      if (!g) throw new Error("unknown agent");
+      const now = office.opts.now?.() ?? Date.now();
+      const mine = office.grants.filter((x) => x.agentId === g.id);
+      const conns = office.listConnections(g.projectId);
+      // Names only: the panel shows what this agent can and cannot do, never a credential.
+      const access = mine.filter((x) => x.connectionId !== TEAM_CONNECTION).map((x) => {
+        const c = conns.find((k) => k.id === x.connectionId);
+        return { grantId: x.id, connectionId: x.connectionId, service: c?.service ?? x.connectionId, label: c?.label, tools: x.tools, resources: x.resources, expiresAt: x.expiresAt, expired: x.expiresAt !== undefined && now >= x.expiresAt };
+      });
+      const cannot = g.kind === "manager" ? [] : conns.map((c) => {
+        const allowed = new Set(access.filter((x) => x.connectionId === c.id && !x.expired).flatMap((x) => x.tools));
+        return { connectionId: c.id, service: c.service, label: c.label, tools: office.discoveredTools(c.projectId, c.id).map((t) => t.name).filter((n) => !allowed.has(n)) };
+      }).filter((c) => c.tools.length > 0);
+      const open = office.tickets.list({ open: true }).filter((t) => t.assigneeId === g.id).map((t) => summary(t));
+      return ok({
+        id: g.id, name: g.name, role: g.role, skills: g.skills, projectId: g.projectId, kind: g.kind, mode: g.mode, engineModel: g.engineModel,
+        status: g.status, paused: Boolean(g.paused), sleepUntil: g.sleepUntil, tokensToday: g.tokensToday, tickets: open, access, cannot,
+        managerTools: g.kind === "manager" ? mine.filter((x) => x.connectionId === TEAM_CONNECTION).flatMap((x) => x.tools) : undefined,
+      });
+    }
+    case "agents.update": {
+      const a = z.object({
+        id: Id, name: z.string().trim().min(1).max(40).optional(), role: z.string().trim().min(1).max(60).optional(),
+        skills: z.string().trim().max(300).optional(), mode: ApprovalMode.optional(), engineModel: z.string().regex(/^([a-z0-9.-]{1,40})?$/).optional(),
+      }).parse(payload);
+      const { id, ...patch } = a;
+      const g = office.updateAgent(id, patch);
+      return ok({ id: g.id });
+    }
+    case "agents.pause":
+    case "agents.resume": {
+      const a = z.object({ id: Id }).parse(payload);
+      office.setPaused(a.id, type === "agents.pause");
+      return ok({ id: a.id, paused: type === "agents.pause" });
+    }
+    case "agents.fire": {
+      const a = z.object({ id: Id }).parse(payload);
+      office.audit.append({ kind: "agent.fire_requested", agentId: a.id, deviceId });
+      return ok(office.fireAgent(a.id));
     }
     case "agents.add": {
       const a = z.object({
