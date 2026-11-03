@@ -99,7 +99,7 @@ Remote servers use `spec: { kind: "http", url: "https://..." }` and receive the 
 ## Tests
 
 ```bash
-npm test            # 144 tests across shared, host (real MCP servers, a stand-in for Claude Code) and hub
+npm test            # 147 tests across shared, host (real MCP servers, a stand-in for Claude Code) and hub
 npm run typecheck   # all four packages
 ```
 

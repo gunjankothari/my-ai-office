@@ -3,13 +3,15 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fingerprint } from "@agent-office/shared";
 import { seedDemo } from "./demo";
-import { HostLink } from "./link";
+import { HostLink, readLinkState } from "./link";
 import { Office } from "./office";
 import { loadMasterKey } from "./vault";
 
 const home = process.env.AGENT_OFFICE_HOME ?? join(homedir(), ".agent-office");
 const name = process.env.OFFICE_NAME ?? hostname();
-const hubUrl = process.env.HUB_URL ?? "ws://127.0.0.1:8787";
+const saved = readLinkState(join(home, "hub.json"));
+const hubUrl = process.env.HUB_URL ?? saved.url ?? "ws://127.0.0.1:8787";
+if (!process.env.HUB_URL && !saved.url) console.log("[host] no hub address known: using the local default. Set HUB_URL (and ENROLL_TOKEN the first time) to use a hub elsewhere.");
 
 const office = await Office.open({ home, name, masterKey: loadMasterKey(home), autoDispatch: true, maxParallel: Number(process.env.MAX_PARALLEL ?? 2) });
 if (process.argv.includes("--demo")) await seedDemo(office);
@@ -24,7 +26,7 @@ const link = new HostLink({
 link.start();
 office.dispatcher.start();
 
-console.log(`[host] office "${name}", home ${home}`);
+console.log(`[host] office "${name}", home ${home}, hub ${hubUrl}`);
 console.log(`[host] host key fingerprint: ${await fingerprint(office.publicKey)}`);
 
 const showCode = () => {

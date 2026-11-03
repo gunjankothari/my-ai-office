@@ -27,6 +27,8 @@ agent wants a risky action ─► "Needs you" ─► you approve ─► it carri
 - A ticket waiting for approval does not hold its agent: the agent is free for other work until you answer.
 - If the office restarts, a half-done ticket is **not** re-run on its own. It asks you first, because the work may already have had effects. Triage, which has none, simply starts again.
 - Cancelling stops the run if there is one.
+- An agent that cannot do the work (a missing tool, access or information) is told to start its reply with `BLOCKED:`. The ticket then goes to **Needs you** with what it needs, instead of being marked Done. Your answer sends it back to the same agent.
+- When an agent starts, the ticket records the tools it had (`Tools available (3): github/get_me, …`, or `No tools granted`), so a missing tool is visible on the ticket.
 
 ## Limits, subtickets and "after"
 

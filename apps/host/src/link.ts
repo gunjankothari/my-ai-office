@@ -19,6 +19,11 @@ export interface LinkOptions {
   log?: (m: string) => void;
 }
 
+/** What the host remembers between starts. Contains no secret. */
+export function readLinkState(file: string): { officeId?: string; url?: string } {
+  try { return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as { officeId?: string; url?: string }) : {}; } catch { return {}; }
+}
+
 export class HostLink {
   private ws: WebSocket | undefined;
   private stopped = false;
@@ -35,13 +40,14 @@ export class HostLink {
     if (saved.officeId) o.office.officeId = saved.officeId;
   }
 
-  private loadState(): { officeId?: string } {
-    return existsSync(this.o.stateFile) ? (JSON.parse(readFileSync(this.o.stateFile, "utf8")) as { officeId?: string }) : {};
+  private loadState(): { officeId?: string; url?: string } {
+    return readLinkState(this.o.stateFile);
   }
 
+  /** Remembers which office this is and which hub it enrolled with, so a later start needs no HUB_URL. */
   private saveOfficeId(id: string): void {
     mkdirSync(dirname(this.o.stateFile), { recursive: true });
-    writeFileSync(this.o.stateFile, JSON.stringify({ officeId: id }), { mode: 0o600 });
+    writeFileSync(this.o.stateFile, JSON.stringify({ officeId: id, url: this.o.url }), { mode: 0o600 });
   }
 
   start(): void {

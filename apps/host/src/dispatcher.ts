@@ -173,8 +173,11 @@ export class Dispatcher {
       `Ticket ${t.id} (${t.priority}): ${t.title}\n${clip(t.description, 4000)}\n` +
       (note ? `\nManager's note: ${note}\n` : "") +
       (answer ? `\nThe user added: ${answer}\n` : "") +
-      `\nDo this ticket with the tools you have. When you finish, reply with a short result: what you did or found.`;
-    store.update(ticketId, { status: "progress" }, { kind: "started", actor: agent.id });
+      `\nDo this ticket with the tools you have. When you finish, reply with a short result: what you did or found. ` +
+      `If you cannot complete it (a tool, access or piece of information is missing), start your reply with "BLOCKED:" and say exactly what you need. Never pretend to have done it.`;
+    // Record what the agent could actually use, so a missing tool is visible on the ticket instead of guessed at.
+    const tools = this.office.gateway.listTools(agent.id).map((t) => `${t.connectionId}/${t.name}`);
+    store.update(ticketId, { status: "progress" }, { kind: "started", actor: agent.id, text: tools.length ? `Tools available (${tools.length}): ${tools.slice(0, 8).join(", ")}${tools.length > 8 ? ", …" : ""}` : "No tools granted" });
     const out = await this.office.runTask(agent.id, prompt, { runId: `${ticketId}-${this.now().toString(36)}`, signal });
     this.finish(ticketId, agent, out);
   }
@@ -190,9 +193,17 @@ export class Dispatcher {
     if (store.get(ticketId)?.status === "cancelled") return; // the user cancelled while it ran
     const usage = out.status === "finished" || out.status === "waiting_approval" ? { tokens: out.tokens, costUsd: out.equivalentCostUsd } : {};
     switch (out.status) {
-      case "finished":
-        store.update(ticketId, { status: "done", result: clip(out.text, 4000), question: undefined }, { kind: "finished", actor: agent.id, text: clip(out.text, 300), ...usage });
+      case "finished": {
+        // An agent that says it could not do the work has not finished it. Ask you, instead of calling it done.
+        const blocked = /^\s*BLOCKED:\s*/i.exec(out.text);
+        if (blocked) {
+          const need = clip(out.text.slice(blocked[0].length).trim() || "The agent could not complete this.", 500);
+          store.update(ticketId, { status: "waiting_user", question: need }, { kind: "asked_user", actor: agent.id, text: need, ...usage });
+        } else {
+          store.update(ticketId, { status: "done", result: clip(out.text, 4000), question: undefined }, { kind: "finished", actor: agent.id, text: clip(out.text, 300), ...usage });
+        }
         break;
+      }
       case "waiting_approval":
         this.paused.set(ticketId, { state: out.resume, approvals: out.approvals, answered: new Map() });
         store.update(ticketId, { status: "waiting_approval" }, { kind: "approval_requested", actor: agent.id, text: out.approvals.map((a) => a.summary).join("; "), ...usage });

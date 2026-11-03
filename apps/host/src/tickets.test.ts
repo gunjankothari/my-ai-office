@@ -405,3 +405,27 @@ test("every role template is valid, and hiring from one gives no tool access", a
     assert.equal(office.gateway.listTools(id).length, 0);
   }
 });
+
+test("an agent that says it could not do the work does not get its ticket marked Done: it asks you, and your answer sends it back to the same agent", async () => {
+  const { office } = await world();
+  const t = office.tickets.create({ projectId: "p", title: "List PRs", description: "[scenario:cannot]", createdBy: "user", assigneeId: "ada" });
+  await office.dispatcher.drain();
+  let cur = office.tickets.get(t.id)!;
+  assert.equal(cur.status, "waiting_user", JSON.stringify(cur.events));
+  assert.match(cur.question!, /need list_pull_requests/);
+  assert.ok(!cur.question!.startsWith("BLOCKED"));
+  assert.equal(cur.result, undefined);
+  assert.equal(cur.usage.runs, 1, "the blocked run is still counted");
+  assert.match(cur.events.find((e) => e.kind === "started")!.text!, /^Tools available \(\d+\): /, "the ticket records which tools the agent had");
+  await cmd(office, "tickets.reply", { id: t.id, text: "I granted it." });
+  cur = office.tickets.get(t.id)!;
+  assert.equal(cur.status, "assigned");
+  assert.equal(cur.assigneeId, "ada", "the same agent, not a new triage");
+});
+
+test("an agent with no tools says so on the ticket", async () => {
+  const { office } = await world();
+  const t = office.tickets.create({ projectId: "p", title: "x", description: "[scenario:cannot]", createdBy: "user", assigneeId: "quinn" });
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(t.id)!.events.find((e) => e.kind === "started")!.text, "No tools granted");
+});

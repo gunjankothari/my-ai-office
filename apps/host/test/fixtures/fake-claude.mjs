@@ -78,6 +78,7 @@ switch (scenario) {
     result(`TRIAGE tools=${names} -> ${said}`);
     break;
   }
+  case "cannot": result("BLOCKED: I only have get_me. I need list_pull_requests granted to do this."); break;
   case "notool": {
     // The model writes an answer as if it had data, but never asks for a tool.
     out({ type: "assistant", message: { content: [{ type: "text", text: "The tool results will be available shortly." }] }, session_id: sessionId });
@@ -102,4 +103,4 @@ switch (scenario) {
   case "garbage": console.log("this is not json"); console.log("{broken"); console.log(JSON.stringify({ no_type: true })); result("survived noise"); break;
   default: die("unknown scenario " + scenario);
 }
-if (["read", "approval", "resume", "triage", "notool", "blocked", "ratelimit_result", "signedout_result", "garbage"].includes(scenario)) { await client?.close(); }
+if (["read", "approval", "resume", "triage", "cannot", "notool", "blocked", "ratelimit_result", "signedout_result", "garbage"].includes(scenario)) { await client?.close(); }

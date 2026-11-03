@@ -202,6 +202,16 @@ test("the host survives a restart and reconnects with its saved identity (no new
   assert.equal(office2.officeId, w.officeId);
 });
 
+test("the host remembers which hub it enrolled with, so a later start needs no HUB_URL, and the saved file holds no secret", async () => {
+  const w = await world();
+  const { readLinkState } = await import("../src/link");
+  const saved = readLinkState(join(w.office.opts.home, "hub.json"));
+  assert.equal(saved.url, `ws://127.0.0.1:${w.hub.port}`);
+  assert.equal(saved.officeId, w.officeId);
+  assert.deepEqual(Object.keys(saved).sort(), ["officeId", "url"]);
+  assert.deepEqual(readLinkState(join(w.office.opts.home, "missing.json")), {});
+});
+
 test("the vault file holds no plaintext and the host private key is not stored in the clear", async () => {
   const w = await world();
   w.office.vault.put("demo", "github", SECRET);

@@ -62,11 +62,11 @@ export async function handleTeamCommand(office: Office, type: string, payload: R
         office.tickets.note(t.id, "comment", user, a.text);
         return ok(summary(t));
       }
-      // After a restart the same agent just runs again. After a Manager question, the Manager decides again with the answer.
-      // A limit stop or a broken "after" link goes back to the same agent, with more room or without the link.
+      // A restart, a limit, a broken "after" link, or the assigned agent asking itself: that agent runs again.
+      // A question from the Manager goes back to the Manager, who decides again with the answer.
       const lastAsk = [...t.events].reverse().find((e) => ["asked_user", "interrupted", "limit_reached", "blocked"].includes(e.kind));
-      const resume = lastAsk && lastAsk.kind !== "asked_user" && t.assigneeId;
-      const back = resume ? "assigned" : "new";
+      const workerAsked = lastAsk?.kind === "asked_user" && lastAsk.actor === t.assigneeId;
+      const back = ((lastAsk && lastAsk.kind !== "asked_user") || workerAsked) && t.assigneeId ? "assigned" : "new";
       if (lastAsk?.kind === "limit_reached") office.tickets.raiseLimits(t.id);
       office.tickets.update(t.id, { status: back, question: undefined, ...(lastAsk?.kind === "blocked" ? { afterId: undefined } : {}), ...(back === "new" ? { assigneeId: undefined } : {}) }, { kind: "user_replied", actor: user, text: a.text });
       return ok(summary(office.tickets.get(t.id)!));
