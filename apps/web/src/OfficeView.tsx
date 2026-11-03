@@ -5,7 +5,10 @@ import type { HubClient, OfficeInfo } from "./lib/hub";
 import { officeRunner, type Runner } from "./lib/commands";
 import { ToolsTab } from "./Tools";
 
-type Summary = Pick<Ticket, "id" | "projectId" | "title" | "status" | "priority" | "assigneeId" | "question" | "usage" | "createdAt" | "updatedAt">;
+type Summary = Pick<Ticket, "id" | "projectId" | "title" | "status" | "priority" | "assigneeId" | "question" | "usage" | "createdAt" | "updatedAt" | "parentId" | "afterId" | "budgetTokens" | "maxRounds"> & {
+  rolledUp?: TicketUsage; subtickets?: number; blockedBy?: string;
+};
+type Detailed = Ticket & { rolledUp: TicketUsage; subtickets: Summary[]; blockedBy?: string };
 interface Member { id: string; name: string; role: string; skills?: string; projectId: string; status: string; kind?: string; tokensToday: number; hasEngine: boolean; openTickets: number; sleepUntil?: number }
 interface Team { projects: { id: string; name: string }[]; agents: Member[] }
 interface Approval { id: string; agent: string; summary: string; risk: string; reason: string }
@@ -21,6 +24,14 @@ const STATUS: Record<TicketStatus, { label: string; tone: "idle" | "work" | "you
   failed: { label: "Failed", tone: "bad" },
   cancelled: { label: "Cancelled", tone: "idle" },
 };
+// The board's columns. Failed and cancelled tickets sit with Done, marked by their own chip.
+const COLUMNS: { title: string; statuses: TicketStatus[] }[] = [
+  { title: "New", statuses: ["new"] },
+  { title: "Planning", statuses: ["planning", "assigned"] },
+  { title: "In progress", statuses: ["progress"] },
+  { title: "Waiting for you", statuses: ["waiting_approval", "waiting_user"] },
+  { title: "Done", statuses: ["done", "failed", "cancelled"] },
+];
 const OPEN: TicketStatus[] = ["new", "planning", "assigned", "progress", "waiting_approval", "waiting_user"];
 
 const ago = (t: number) => {
@@ -99,11 +110,18 @@ export function OfficeView(p: { office: OfficeInfo; hub: HubClient; device: Devi
 function Tickets(p: { run: Runner; team: Team; tickets: Summary[]; approvals: Approval[]; name: (id: string) => string; reload: () => Promise<void> }) {
   const [filter, setFilter] = useState<"open" | "done" | "all">("open");
   const [selected, setSelected] = useState<string | null>(null);
-  const [showNew, setShowNew] = useState(false);
+  const [showNew, setShowNew] = useState<false | { parentId?: string }>(false);
+  const [view, setView] = useState<"list" | "board">("list");
+  const [showSub, setShowSub] = useState(false);
+  const [query, setQuery] = useState("");
   const [msg, setMsg] = useState("");
   // "Open" also keeps tickets that finished in the last 10 minutes, so you see the result of what you just asked for.
   const recent = (t: Summary) => Date.now() - t.updatedAt < 10 * 60_000;
-  const shown = p.tickets.filter((t) => (filter === "all" ? true : filter === "open" ? OPEN.includes(t.status) || recent(t) : !OPEN.includes(t.status)));
+  const q = query.trim().toLowerCase();
+  const byFilter = (t: Summary) => (filter === "all" ? true : filter === "open" ? OPEN.includes(t.status) || recent(t) : !OPEN.includes(t.status));
+  // A search looks at every ticket, subtickets included. Otherwise subtickets are tucked under their parent unless you ask for them.
+  const matches = (t: Summary) => !q || t.id.toLowerCase() === q || t.id.toLowerCase().includes(q) || t.title.toLowerCase().includes(q);
+  const shown = p.tickets.filter((t) => byFilter(t) && matches(t) && (showSub || q !== "" || !t.parentId));
   const needsYou = p.tickets.filter((t) => t.status === "waiting_user");
 
   const act = async (fn: () => Promise<unknown>) => {
@@ -131,9 +149,9 @@ function Tickets(p: { run: Runner; team: Team; tickets: Summary[]; approvals: Ap
       )}
 
       {showNew || p.team.projects.length === 0 ? (
-        <NewTicket run={p.run} team={p.team} onCancel={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); setSelected(id); void p.reload(); }} />
+        <NewTicket run={p.run} team={p.team} tickets={p.tickets} parentId={showNew ? showNew.parentId : undefined} onCancel={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); setSelected(id); void p.reload(); }} />
       ) : (
-        <div className="btns"><button className="primary" onClick={() => setShowNew(true)}>+ New ticket</button></div>
+        <div className="btns"><button className="primary" onClick={() => setShowNew({})}>+ New ticket</button></div>
       )}
 
       <div className="filters" role="group" aria-label="Show">
@@ -143,21 +161,52 @@ function Tickets(p: { run: Runner; team: Team; tickets: Summary[]; approvals: Ap
           </button>
         ))}
       </div>
-      {msg && <p className="err" role="alert">{msg}</p>}
-      <div className="tickets">
-        {shown.map((t) => (
-          <div key={t.id}>
-            <button className={"ticket" + (selected === t.id ? " sel" : "")} onClick={() => setSelected(selected === t.id ? null : t.id)} aria-expanded={selected === t.id}>
-              <span className="tid">{t.id}</span>
-              <span className="ttitle">{t.title}</span>
-              <StatusChip status={t.status} />
-              <span className="tmeta muted">{t.assigneeId ? p.name(t.assigneeId) : "No one yet"} · {ago(t.updatedAt)}</span>
-            </button>
-            {selected === t.id && <Detail id={t.id} run={p.run} team={p.team} name={p.name} reload={p.reload} />}
-          </div>
-        ))}
-        {shown.length === 0 && <div className="empty">{filter === "open" ? "Nothing open or recent. Create a ticket above." : "Nothing here yet."}</div>}
+      <div className="toolbar">
+        <label className="sr" htmlFor="t-search">Search tickets</label>
+        <input id="t-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search by number or words" />
+        <label className="check"><input type="checkbox" checked={showSub} onChange={(e) => setShowSub(e.target.checked)} /> Show subtickets</label>
+        <div className="filters" role="group" aria-label="View">
+          {(["list", "board"] as const).map((v) => <button key={v} className={view === v ? "on" : ""} aria-pressed={view === v} onClick={() => setView(v)}>{v === "list" ? "List" : "Board"}</button>)}
+        </div>
       </div>
+      {msg && <p className="err" role="alert">{msg}</p>}
+      {view === "board" ? (
+        <div className="board">
+          {COLUMNS.map((c) => {
+            const col = shown.filter((t) => c.statuses.includes(t.status));
+            return (
+              <section key={c.title} className="col" aria-label={c.title}>
+                <h3>{c.title} <span className="muted">{col.length}</span></h3>
+                {col.map((t) => (
+                  <button key={t.id} className={"card" + (selected === t.id ? " sel" : "")} onClick={() => setSelected(selected === t.id ? null : t.id)}>
+                    <span className="tid">{t.id}</span> <span className="ttitle">{t.title}</span>
+                    {(t.status === "failed" || t.status === "cancelled") && <StatusChip status={t.status} />}
+                    <span className="tmeta muted">{t.assigneeId ? p.name(t.assigneeId) : "No one yet"}{t.rolledUp?.runs ? ` · ${t.rolledUp.tokens.toLocaleString()} tokens` : ""}</span>
+                    {t.blockedBy && <span className="tmeta muted">Waits for {t.blockedBy}</span>}
+                    {t.subtickets ? <span className="tmeta muted">{t.subtickets} subticket{t.subtickets === 1 ? "" : "s"}</span> : null}
+                  </button>
+                ))}
+              </section>
+            );
+          })}
+          {selected && <div className="boarddetail"><Detail id={selected} run={p.run} team={p.team} name={p.name} reload={p.reload} onSub={(parentId) => setShowNew({ parentId })} onOpen={setSelected} /></div>}
+        </div>
+      ) : (
+        <div className="tickets">
+          {shown.map((t) => (
+            <div key={t.id}>
+              <button className={"ticket" + (selected === t.id ? " sel" : "")} onClick={() => setSelected(selected === t.id ? null : t.id)} aria-expanded={selected === t.id}>
+                <span className="tid">{t.id}</span>
+                <span className="ttitle">{t.parentId ? <span className="muted">↳ {t.parentId} · </span> : null}{t.title}</span>
+                <StatusChip status={t.status} />
+                <span className="tmeta muted">{t.assigneeId ? p.name(t.assigneeId) : "No one yet"} · {ago(t.updatedAt)}{t.subtickets ? ` · ${t.subtickets} subticket${t.subtickets === 1 ? "" : "s"}` : ""}{t.blockedBy ? ` · waits for ${t.blockedBy}` : ""}</span>
+              </button>
+              {selected === t.id && <Detail id={t.id} run={p.run} team={p.team} name={p.name} reload={p.reload} onSub={(parentId) => setShowNew({ parentId })} onOpen={setSelected} />}
+            </div>
+          ))}
+          {shown.length === 0 && <div className="empty">{q ? "No ticket matches that." : filter === "open" ? "Nothing open or recent. Create a ticket above." : "Nothing here yet."}</div>}
+        </div>
+      )}
     </>
   );
 }
@@ -177,8 +226,13 @@ function Question({ t, onReply, onOpen, name }: { t: Summary; onReply: (text: st
   );
 }
 
-function NewTicket({ run, team, onCreated, onCancel }: { run: Runner; team: Team; onCreated: (id: string) => void; onCancel: () => void }) {
-  const [projectId, setProjectId] = useState("");
+function NewTicket({ run, team, tickets, parentId: presetParent, onCreated, onCancel }: { run: Runner; team: Team; tickets: Summary[]; parentId?: string; onCreated: (id: string) => void; onCancel: () => void }) {
+  const preset = presetParent ? tickets.find((x) => x.id === presetParent) : undefined;
+  const [projectId, setProjectId] = useState(preset?.projectId ?? "");
+  const [parent, setParent] = useState(presetParent ?? "");
+  const [after, setAfter] = useState("");
+  const [budget, setBudget] = useState("");
+  const [rounds, setRounds] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState("normal");
@@ -186,6 +240,7 @@ function NewTicket({ run, team, onCreated, onCancel }: { run: Runner; team: Team
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const pid = projectId || team.projects[0]?.id || "";
+  const related = tickets.filter((x) => x.projectId === pid);
   const members = team.agents.filter((a) => a.projectId === pid && a.kind !== "manager" && a.hasEngine);
   const hasManager = team.agents.some((a) => a.projectId === pid && a.kind === "manager");
 
@@ -195,8 +250,10 @@ function NewTicket({ run, team, onCreated, onCancel }: { run: Runner; team: Team
     e.preventDefault();
     setBusy(true); setErr("");
     try {
-      const t = await run<Summary>("tickets.create", { projectId: pid, title, description, priority, ...(assignee ? { assigneeId: assignee } : {}) });
-      setTitle(""); setDescription(""); setAssignee("");
+      const t = await run<Summary>("tickets.create", { projectId: pid, title, description, priority, ...(assignee ? { assigneeId: assignee } : {}),
+        ...(parent ? { parentId: parent } : {}), ...(after ? { afterId: after } : {}),
+        ...(budget ? { budgetTokens: Number(budget) } : {}), ...(rounds ? { maxRounds: Number(rounds) } : {}) });
+      setTitle(""); setDescription(""); setAssignee(""); setParent(""); setAfter(""); setBudget(""); setRounds("");
       onCreated(t.id);
     } catch (x) { setErr((x as Error).message); }
     setBusy(false);
@@ -208,7 +265,7 @@ function NewTicket({ run, team, onCreated, onCancel }: { run: Runner; team: Team
       <div className="grid2">
         <div><label htmlFor="nt-title">What needs doing?</label><input id="nt-title" value={title} onChange={(e) => setTitle(e.target.value)} maxLength={200} required placeholder="Short title" /></div>
         <div><label htmlFor="nt-project">Project</label>
-          <select id="nt-project" value={pid} onChange={(e) => { setProjectId(e.target.value); setAssignee(""); }}>{team.projects.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
+          <select id="nt-project" value={pid} onChange={(e) => { setProjectId(e.target.value); setAssignee(""); setParent(""); setAfter(""); }}>{team.projects.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
       </div>
       <label htmlFor="nt-desc">Details (optional)</label>
       <textarea id="nt-desc" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={8000} rows={3} placeholder="Anything the agent should know. This never leaves your machine except to your own Claude Code." />
@@ -221,18 +278,36 @@ function NewTicket({ run, team, onCreated, onCancel }: { run: Runner; team: Team
         <div><label htmlFor="nt-pri">Priority</label>
           <select id="nt-pri" value={priority} onChange={(e) => setPriority(e.target.value)}><option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option></select></div>
       </div>
+      <div className="grid2">
+        <div><label htmlFor="nt-parent">Part of (optional)</label>
+          <select id="nt-parent" value={parent} onChange={(e) => setParent(e.target.value)}>
+            <option value="">Not a subticket</option>
+            {related.map((x) => <option key={x.id} value={x.id}>{x.id} {x.title}</option>)}
+          </select></div>
+        <div><label htmlFor="nt-after">Starts after (optional)</label>
+          <select id="nt-after" value={after} onChange={(e) => setAfter(e.target.value)}>
+            <option value="">No need to wait</option>
+            {related.map((x) => <option key={x.id} value={x.id}>{x.id} {x.title}</option>)}
+          </select></div>
+      </div>
+      <div className="grid2">
+        <div><label htmlFor="nt-budget">Token budget (optional)</label>
+          <input id="nt-budget" type="number" min={1000} step={1000} value={budget} onChange={(e) => setBudget(e.target.value)} placeholder="Ask me after this many tokens" /></div>
+        <div><label htmlFor="nt-rounds">Most rounds (default 6)</label>
+          <input id="nt-rounds" type="number" min={1} max={50} value={rounds} onChange={(e) => setRounds(e.target.value)} placeholder="6" /></div>
+      </div>
       {err && <p className="err" role="alert">{err}</p>}
       <div className="btns"><button className="primary" disabled={busy}>{busy ? "Creating…" : "Create ticket"}</button><button type="button" className="ghost" onClick={onCancel}>Cancel</button></div>
     </form>
   );
 }
 
-function Detail({ id, run, team, name, reload }: { id: string; run: Runner; team: Team; name: (id: string) => string; reload: () => Promise<void> }) {
-  const [t, setT] = useState<Ticket | null>(null);
+function Detail({ id, run, team, name, reload, onSub, onOpen }: { id: string; run: Runner; team: Team; name: (id: string) => string; reload: () => Promise<void>; onSub: (parentId: string) => void; onOpen: (id: string) => void }) {
+  const [t, setT] = useState<Detailed | null>(null);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [who, setWho] = useState("");
-  const refresh = useCallback(async () => { try { setT(await run<Ticket>("tickets.get", { id })); } catch (e) { setErr((e as Error).message); } }, [run, id]);
+  const refresh = useCallback(async () => { try { setT(await run<Detailed>("tickets.get", { id })); } catch (e) { setErr((e as Error).message); } }, [run, id]);
   useEffect(() => { void refresh(); const i = setInterval(() => void refresh(), 4000); return () => clearInterval(i); }, [refresh]);
   if (!t) return <div className="detail muted">{err || "Loading…"}</div>;
 
@@ -247,6 +322,16 @@ function Detail({ id, run, team, name, reload }: { id: string; run: Runner; team
       {t.description && <p className="desc">{t.description}</p>}
       {t.result && <div className="result"><b>Result</b><p>{t.result}</p></div>}
       {t.question && <p className="ask"><b>Question:</b> {t.question}</p>}
+      {(t.parentId || t.afterId) && (
+        <p className="muted">
+          {t.parentId && <>Part of <button className="linkish" onClick={() => onOpen(t.parentId!)}>{t.parentId}</button>. </>}
+          {t.afterId && <>{t.blockedBy ? "Waits for " : "Started after "}<button className="linkish" onClick={() => onOpen(t.afterId!)}>{t.afterId}</button>.</>}
+        </p>
+      )}
+      <p className="muted limits">
+        Budget: {t.budgetTokens ? `${t.rolledUp.tokens.toLocaleString()} of ${t.budgetTokens.toLocaleString()} tokens` : "no token limit"} · Rounds: {t.usage.runs} of {t.maxRounds}
+        {t.budgetTokens ? <meter min={0} max={t.budgetTokens} value={Math.min(t.rolledUp.tokens, t.budgetTokens)} aria-label="Tokens used of budget" /> : null}
+      </p>
 
       <h3>Who worked on it</h3>
       {worked.length === 0 ? <p className="muted">No one yet.</p> : (
@@ -254,6 +339,21 @@ function Detail({ id, run, team, name, reload }: { id: string; run: Runner; team
           {worked.map(([id, u]) => <tr key={id}><th scope="row">{name(id)}</th><td>{u.runs} run{u.runs === 1 ? "" : "s"}</td><td><Usage u={u} /></td></tr>)}
           <tr className="total"><th scope="row">Total</th><td>{t.usage.runs} runs</td><td><Usage u={t.usage} /></td></tr>
         </tbody></table>
+      )}
+
+      {(t.subtickets.length > 0 || open) && (
+        <>
+          <h3>Subtickets</h3>
+          {t.subtickets.length > 0 && (
+            <>
+              <ul className="subs">
+                {t.subtickets.map((c) => <li key={c.id}><button className="linkish" onClick={() => onOpen(c.id)}>{c.id} {c.title}</button> <StatusChip status={c.status} /></li>)}
+              </ul>
+              <p className="muted">With subtickets: <Usage u={t.rolledUp} /></p>
+            </>
+          )}
+          {open && <div className="btns"><button className="ghost" onClick={() => onSub(t.id)}>+ Add a subticket</button></div>}
+        </>
       )}
 
       <h3>Timeline</h3>
@@ -287,7 +387,7 @@ function Detail({ id, run, team, name, reload }: { id: string; run: Runner; team
 const VERB: Record<string, string> = {
   created: "created the ticket", triage_started: "started deciding who should take it", assigned: "assigned it", started: "started work",
   approval_requested: "asked for your approval", approval_resolved: "got your answer", asked_user: "asked you a question", user_replied: "answered",
-  comment: "added a note", finished: "finished", failed: "could not finish", cancelled: "cancelled it", rate_limited: "hit the usage limit and will try again", interrupted: "was interrupted",
+  comment: "added a note", finished: "finished", failed: "could not finish", cancelled: "cancelled it", rate_limited: "hit the usage limit and will try again", interrupted: "was interrupted", limit_reached: "stopped at its limit", blocked: "could not start because the ticket it waits for ended badly",
 };
 
 // ---------------------------------------------------------------- team

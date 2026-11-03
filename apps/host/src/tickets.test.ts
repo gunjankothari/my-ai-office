@@ -235,3 +235,90 @@ test("tickets survive a restart", async () => {
   assert.equal(again.tickets.get(t.id)!.title, "keep me");
   assert.equal(again.tickets.create({ projectId: "p", title: "next", createdBy: "user" }).id, "T-2");
 });
+
+test("subtickets and 'after' links stay inside one project, and a parent's usage includes its subtickets", async () => {
+  const { office } = await world();
+  const parent = office.tickets.create({ projectId: "p", title: "Parent", createdBy: "user" });
+  const kid = office.tickets.create({ projectId: "p", title: "Kid", createdBy: "user", parentId: parent.id });
+  const other = office.tickets.create({ projectId: "q", title: "Elsewhere", createdBy: "user" });
+  assert.throws(() => office.tickets.create({ projectId: "p", title: "x", createdBy: "user", parentId: other.id }), /not a ticket in this project/);
+  assert.throws(() => office.tickets.create({ projectId: "p", title: "x", createdBy: "user", afterId: "T-999" }), /not a ticket in this project/);
+  office.tickets.addUsage(parent.id, "ada", { tokens: 100, costUsd: 0.01 });
+  office.tickets.addUsage(kid.id, "quinn", { tokens: 50, costUsd: 0.005 });
+  assert.equal(office.tickets.rolledUp(parent.id).tokens, 150);
+  assert.equal(office.tickets.get(parent.id)!.usage.tokens, 100, "its own usage is unchanged");
+  const got = await cmd(office, "tickets.get", { id: parent.id });
+  assert.equal(got.subtickets.length, 1);
+  assert.equal(got.rolledUp.tokens, 150);
+});
+
+test("a ticket that comes 'after' another waits until it is done", async () => {
+  const { office } = await world();
+  const a = office.tickets.create({ projectId: "p", title: "First", createdBy: "user" });
+  const b = office.tickets.create({ projectId: "p", title: "Second", description: "[scenario:read]", createdBy: "user", assigneeId: "ada", afterId: a.id });
+  office.dispatcher.tick();
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(b.id)!.status, "assigned", "still waiting for the first");
+  assert.equal(office.tickets.blockedBy(office.tickets.get(b.id)!)?.id, a.id);
+  office.tickets.update(a.id, { status: "done" });
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(b.id)!.status, "done");
+});
+
+test("if the ticket it waits for fails, it asks you, and goes on without the link when you say so", async () => {
+  const { office } = await world();
+  const a = office.tickets.create({ projectId: "p", title: "First", createdBy: "user" });
+  const b = office.tickets.create({ projectId: "p", title: "Second", description: "[scenario:read]", createdBy: "user", assigneeId: "ada", afterId: a.id });
+  office.tickets.update(a.id, { status: "failed" });
+  await office.dispatcher.drain();
+  const asked = office.tickets.get(b.id)!;
+  assert.equal(asked.status, "waiting_user");
+  assert.equal(kinds(office, b.id).at(-1), "blocked");
+  await cmd(office, "tickets.reply", { id: b.id, text: "go on without it" });
+  assert.equal(office.tickets.get(b.id)!.afterId, undefined);
+  assert.equal(office.tickets.get(b.id)!.assigneeId, "ada", "it stays with the same agent");
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(b.id)!.status, "done");
+});
+
+test("a ticket that reaches its token budget stops and asks, and a yes gives it more room", async () => {
+  const { office } = await world();
+  const t = office.tickets.create({ projectId: "p", title: "Costly", description: "[scenario:read]", createdBy: "user", assigneeId: "ada", budgetTokens: 100 });
+  office.tickets.addUsage(t.id, "ada", { tokens: 120 });
+  await office.dispatcher.drain();
+  const stopped = office.tickets.get(t.id)!;
+  assert.equal(stopped.status, "waiting_user");
+  assert.equal(kinds(office, t.id).at(-1), "limit_reached");
+  assert.match(stopped.question!, /budget/);
+  assert.equal(office.agents.get("ada")!.tokensToday, 0, "no run was started");
+
+  await cmd(office, "tickets.reply", { id: t.id, text: "yes, continue" });
+  assert.ok(office.tickets.get(t.id)!.budgetTokens! > 120, "the budget grew past what was used");
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(t.id)!.status, "done");
+});
+
+test("the budget counts a ticket's subtickets, and the round limit counts every run", async () => {
+  const { office } = await world();
+  const parent = office.tickets.create({ projectId: "p", title: "Big", description: "[scenario:read]", createdBy: "user", assigneeId: "ada", budgetTokens: 100 });
+  const kid = office.tickets.create({ projectId: "p", title: "Part", createdBy: "user", parentId: parent.id });
+  office.tickets.addUsage(kid.id, "quinn", { tokens: 150 });
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(parent.id)!.status, "waiting_user", "the subticket's tokens counted");
+
+  const r = office.tickets.create({ projectId: "p", title: "Many rounds", description: "[scenario:read]", createdBy: "user", assigneeId: "ada", maxRounds: 2 });
+  office.tickets.addUsage(r.id, "ada", {});
+  office.tickets.addUsage(r.id, "ada", {});
+  await office.dispatcher.drain();
+  assert.match(office.tickets.get(r.id)!.question!, /2 rounds/);
+});
+
+test("limits are validated, and tickets saved before limits existed get the default", async () => {
+  const { office } = await world();
+  await assert.rejects(cmd(office, "tickets.create", { projectId: "p", title: "x", budgetTokens: 5 }));
+  await assert.rejects(cmd(office, "tickets.create", { projectId: "p", title: "x", maxRounds: 0 }));
+  await assert.rejects(cmd(office, "tickets.create", { projectId: "p", title: "x", parentId: "T-999" }));
+  const ok = await cmd(office, "tickets.create", { projectId: "p", title: "x", budgetTokens: 50_000, maxRounds: 3 });
+  assert.equal(ok.maxRounds, 3);
+  assert.equal(ok.budgetTokens, 50_000);
+});

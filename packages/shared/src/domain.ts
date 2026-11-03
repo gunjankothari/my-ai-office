@@ -53,7 +53,7 @@ export type TicketStatus = z.infer<typeof TicketStatus>;
 export type TicketPriority = "low" | "normal" | "high";
 export type TicketEventKind =
   | "created" | "triage_started" | "assigned" | "started" | "approval_requested" | "approval_resolved"
-  | "asked_user" | "user_replied" | "comment" | "finished" | "failed" | "cancelled" | "rate_limited" | "interrupted";
+  | "asked_user" | "user_replied" | "comment" | "finished" | "failed" | "cancelled" | "rate_limited" | "interrupted" | "limit_reached" | "blocked";
 
 export interface TicketEvent {
   ts: number;
@@ -85,6 +85,14 @@ export interface Ticket {
   question?: string;
   /** The agent's final answer when the ticket is done. */
   result?: string;
+  /** The ticket this one is a part of. Set when created, never changed. */
+  parentId?: string;
+  /** This ticket starts only when that one is done. Set when created, never changed. */
+  afterId?: string;
+  /** Stop and ask you once the ticket (with its subtickets) has used this many tokens. */
+  budgetTokens?: number;
+  /** Stop and ask you after this many runs on the ticket, the Manager's triage included. */
+  maxRounds: number;
   usage: TicketUsage;
   /** Who worked on it, and what each cost. The Manager's triage counts. */
   workers: Record<string, TicketUsage>;

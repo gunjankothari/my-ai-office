@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { Ticket } from "@agent-office/shared";
 import { ApprovalMode, TicketStatus } from "@agent-office/shared";
 import type { Office } from "./office";
-import { isOpen } from "./tickets";
+import { isOpen, type TicketStore } from "./tickets";
 
 /*
  * The commands a paired device may send about tickets and the team. They arrive through the usual
@@ -13,9 +13,11 @@ import { isOpen } from "./tickets";
 const Id = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,39}$/, "use lowercase letters, digits, - and _");
 const TicketId = z.string().regex(/^T-\d{1,9}$/);
 
-const summary = (t: Ticket) => ({
+const summary = (t: Ticket, store?: TicketStore) => ({
   id: t.id, projectId: t.projectId, title: t.title, status: t.status, priority: t.priority, assigneeId: t.assigneeId,
   question: t.question, usage: t.usage, createdAt: t.createdAt, updatedAt: t.updatedAt,
+  parentId: t.parentId, afterId: t.afterId, budgetTokens: t.budgetTokens, maxRounds: t.maxRounds,
+  ...(store ? { rolledUp: store.rolledUp(t.id), subtickets: store.children(t.id).length, blockedBy: store.blockedBy(t)?.id } : {}),
 });
 
 const RUNNING = new Set(["planning", "progress", "waiting_approval"]);
@@ -28,16 +30,19 @@ export async function handleTeamCommand(office: Office, type: string, payload: R
   switch (type) {
     case "tickets.list": {
       const a = z.object({ projectId: Id.optional(), status: TicketStatus.optional(), open: z.boolean().optional() }).parse(payload);
-      return ok(office.tickets.list(a).slice(0, 200).map(summary));
+      return ok(office.tickets.list(a).slice(0, 200).map((t) => summary(t, office.tickets)));
     }
     case "tickets.get": {
       const a = z.object({ id: TicketId }).parse(payload);
-      return ok(ticket(a.id));
+      const t = ticket(a.id);
+      return ok({ ...t, rolledUp: office.tickets.rolledUp(t.id), subtickets: office.tickets.children(t.id).map((c) => summary(c, office.tickets)), blockedBy: office.tickets.blockedBy(t)?.id });
     }
     case "tickets.create": {
       const a = z.object({
         projectId: Id, title: z.string().trim().min(1).max(200), description: z.string().max(8000).optional(),
         priority: z.enum(["low", "normal", "high"]).optional(), assigneeId: Id.optional(),
+        parentId: TicketId.optional(), afterId: TicketId.optional(),
+        budgetTokens: z.number().int().min(1000).max(100_000_000).optional(), maxRounds: z.number().int().min(1).max(50).optional(),
       }).parse(payload);
       if (!office.projects.has(a.projectId)) throw new Error("unknown project");
       if (a.assigneeId) {
@@ -47,7 +52,7 @@ export async function handleTeamCommand(office: Office, type: string, payload: R
       }
       const t = office.tickets.create({ ...a, createdBy: user });
       office.audit.append({ kind: "ticket.created", projectId: t.projectId, ticketId: t.id, deviceId });
-      return ok(summary(t));
+      return ok(summary(t, office.tickets));
     }
     case "tickets.reply": {
       const a = z.object({ id: TicketId, text: z.string().trim().min(1).max(4000) }).parse(payload);
@@ -57,9 +62,12 @@ export async function handleTeamCommand(office: Office, type: string, payload: R
         return ok(summary(t));
       }
       // After a restart the same agent just runs again. After a Manager question, the Manager decides again with the answer.
-      const lastAsk = [...t.events].reverse().find((e) => e.kind === "asked_user" || e.kind === "interrupted");
-      const back = lastAsk?.kind === "interrupted" && t.assigneeId ? "assigned" : "new";
-      office.tickets.update(t.id, { status: back, question: undefined, ...(back === "new" ? { assigneeId: undefined } : {}) }, { kind: "user_replied", actor: user, text: a.text });
+      // A limit stop or a broken "after" link goes back to the same agent, with more room or without the link.
+      const lastAsk = [...t.events].reverse().find((e) => ["asked_user", "interrupted", "limit_reached", "blocked"].includes(e.kind));
+      const resume = lastAsk && lastAsk.kind !== "asked_user" && t.assigneeId;
+      const back = resume ? "assigned" : "new";
+      if (lastAsk?.kind === "limit_reached") office.tickets.raiseLimits(t.id);
+      office.tickets.update(t.id, { status: back, question: undefined, ...(lastAsk?.kind === "blocked" ? { afterId: undefined } : {}), ...(back === "new" ? { assigneeId: undefined } : {}) }, { kind: "user_replied", actor: user, text: a.text });
       return ok(summary(office.tickets.get(t.id)!));
     }
     case "tickets.assign": {

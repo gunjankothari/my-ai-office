@@ -63,6 +63,28 @@ export class Dispatcher {
     return this.office.agents.get(agentId)?.status === "working";
   }
 
+  /**
+   * Whether a ticket may start another round. A ticket that waits for another is skipped until that one is done.
+   * One that has reached its token budget or round limit stops and asks you, instead of spending more.
+   */
+  private ready(t: Ticket): boolean {
+    const store = this.office.tickets;
+    const before = store.blockedBy(t);
+    if (before) {
+      if (before.status === "failed" || before.status === "cancelled") {
+        store.update(t.id, { status: "waiting_user", question: `${before.id} (${before.title}) ended as ${before.status}, and this ticket was waiting for it. Reply to go on without it, or cancel this ticket.` },
+          { kind: "blocked", actor: "office", text: `${before.id} ${before.status}` });
+      }
+      return false;
+    }
+    const why = store.overLimit(t);
+    if (why) {
+      store.update(t.id, { status: "waiting_user", question: `${why} Reply to let it continue with more room, or cancel it.` }, { kind: "limit_reached", actor: "office", text: why });
+      return false;
+    }
+    return true;
+  }
+
   /** Starts whatever can start now. Returns without waiting for the runs. */
   tick(): void {
     const tickets = this.office.tickets;
@@ -74,13 +96,13 @@ export class Dispatcher {
     for (const t of tickets.list({ status: "assigned" }).sort(order)) {
       if (slots() <= 0) return;
       const agent = t.assigneeId ? this.office.agents.get(t.assigneeId) : undefined;
-      if (this.busy.has(t.id) || !this.free(agent) || this.agentBusy(agent.id)) continue;
+      if (this.busy.has(t.id) || !this.free(agent) || this.agentBusy(agent.id) || !this.ready(t)) continue;
       this.launch(t.id, (sig) => this.work(t.id, agent, sig));
     }
     for (const t of tickets.list({ status: "new" }).sort(order)) {
       if (slots() <= 0) return;
       const manager = this.office.managerFor(t.projectId);
-      if (this.busy.has(t.id) || !this.free(manager) || this.agentBusy(manager.id)) continue;
+      if (this.busy.has(t.id) || !this.free(manager) || this.agentBusy(manager.id) || !this.ready(t)) continue;
       this.launch(t.id, (sig) => this.triage(t.id, manager, sig));
     }
   }

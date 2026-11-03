@@ -141,7 +141,8 @@ A separate live run (real hub and host processes, real Chromium) pairs a device,
 | Tools screen: connections, tool review pinned to the definition you saw, access with resource limits and expiry, removal | Done and tested, including in a real browser. See [`docs/TOOLS.md`](docs/TOOLS.md). Adding a connection still happens on the office machine (`npm run github`), because a token must not pass through the hub |
 | Connectors catalog, sealed token entry from the browser | Not started |
 | Tickets, Manager (assign or ask), per-person tokens and cost, approvals inside tickets, Tickets and Team screens | Done and tested, including a real browser against a real hub and host with a stand-in for Claude Code. **Not yet run with a real signed-in Claude Code as the Manager** |
-| Communicator (Slack, Teams, mail), sub-tickets, ticket threads with attachments | Not started |
+| Ticket budgets and round limits, subtickets, "after" links, board view, search | Done and tested on the host. Board and forms are type-checked and build, but **not yet looked at in a browser** |
+| Manager splitting tickets by itself, QA review step, Communicator (Slack, Teams, mail), ticket threads with attachments | Not started |
 | Office view, XP, Skill Studio | Prototype only |
 | Passkey sign-in | Done and tested with a software authenticator (replay, wrong site, lockout, expiry, sign-out on removal). Add passkeys from the Offices page after signing in with the admin token. Set `HUB_REQUIRE_PASSKEY=1` to stop the admin token working once a passkey exists (recovery: unset it, or clear the `passkeys` table). The site address must match `HUB_ALLOWED_ORIGIN`, because passkeys are tied to it. **Not yet tried with a real phone or laptop authenticator** |
 | Push notifications, native mobile app | Not started |
