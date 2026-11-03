@@ -79,6 +79,23 @@ test("admin API needs the token; offices can be created and listed", async () =>
   assert.equal(list[0].hostPublicKey, null);
 });
 
+test("deleting an office needs the token, disconnects its host and stops it reconnecting", async () => {
+  const b = await boot();
+  const h = await enrolledHost(b);
+  const closed = new Promise<number>((r) => h.ws.on("close", (code) => r(code)));
+  assert.equal((await b.api(`/api/offices/${h.officeId}`, { method: "DELETE" }, null)).status, 401);
+  assert.equal((await b.api("/api/offices/off_nope", { method: "DELETE" })).status, 404);
+  assert.equal((await b.api(`/api/offices/${h.officeId}`, { method: "DELETE" })).status, 200);
+  assert.equal(await closed, 4001);
+  assert.equal(b.hub.store.offices().length, 0);
+
+  const ws = new WebSocket(`${b.ws}/host`);
+  const t = tap(ws);
+  const ch = await t.next((m) => m.type === "challenge");
+  ws.send(JSON.stringify({ type: "host.auth", officeId: h.officeId, signature: await h.signer.sign(hostAuthMessage(ch.nonce, h.officeId)) }));
+  assert.equal((await t.next((m) => m.type === "error")).code, "bad_signature");
+});
+
 test("a host enrolls once with its token; the token cannot be reused", async () => {
   const b = await boot();
   const h = await enrolledHost(b);

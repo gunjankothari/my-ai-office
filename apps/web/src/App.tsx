@@ -69,14 +69,14 @@ export function App() {
       <header className="top">
         <div className="brand"><span className="logo" aria-hidden="true">AO</span>Agent Office</div>
         {hub && (
-          <button className="ghost" onClick={() => { hub.close(); sessionStorage.removeItem("hub"); setHub(null); setOffices([]); }}>
+          <button className="ghost" onClick={() => { void hub.logout(); hub.close(); sessionStorage.removeItem("hub"); setHub(null); setOffices([]); }}>
             Disconnect
           </button>
         )}
       </header>
       <main>
         {!hub ? (
-          <ConnectForm onConnect={connect} error={error} />
+          <ConnectForm onConnect={connect} error={error} onError={setError} />
         ) : openId && offices.find((o) => o.id === openId) ? (
           <OfficeView
             office={offices.find((o) => o.id === openId)!}
@@ -90,6 +90,7 @@ export function App() {
             <h1>Offices</h1>
             <p className="muted">Each office is a machine running the Office Host. This page only relays to it. It never sees your credentials.</p>
             <AddOffice hub={hub} onCreated={() => void refresh(hub)} />
+            <Passkeys hub={hub} />
             <div className="cards">
               {offices.map((o) => (
                 <OfficeCard
@@ -100,6 +101,10 @@ export function App() {
                   pinnedKey={pinned[o.id]}
                   onPinned={(k) => setPinned((p) => ({ ...p, [o.id]: k }))}
                   onOpen={() => setOpenId(o.id)}
+                  onDelete={() => {
+                    if (!confirm(`Delete "${o.name}"? Its host is disconnected and must be set up again. Nothing on that machine is erased.`)) return;
+                    hub.deleteOffice(o.id).then(() => refresh(hub)).catch((e: Error) => setError(e.message));
+                  }}
                 />
               ))}
               {offices.length === 0 && <div className="empty">No offices yet. Add one, then run the Office Host on that machine.</div>}
@@ -111,8 +116,20 @@ export function App() {
   );
 }
 
-function ConnectForm({ onConnect, error }: { onConnect: (url: string, token: string) => Promise<void>; error: string }) {
+function ConnectForm({ onConnect, error, onError }: { onConnect: (url: string, token: string) => Promise<void>; error: string; onError: (m: string) => void }) {
   const [url, setUrl] = useState(DEFAULT_HUB);
+  const [passkeys, setPasskeys] = useState(0);
+  useEffect(() => {
+    const t = setTimeout(() => void HubClient.passkeyCount(url.replace(/\/$/, "")).then(setPasskeys), 300);
+    return () => clearTimeout(t);
+  }, [url]);
+  const withPasskey = async () => {
+    setBusy(true);
+    onError("");
+    try { await onConnect(url, await HubClient.passkeyLogin(url.replace(/\/$/, ""))); }
+    catch (e) { onError((e as Error).name === "NotAllowedError" ? "Sign-in was cancelled." : (e as Error).message); }
+    setBusy(false);
+  };
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const submit = async (e: FormEvent) => {
@@ -124,7 +141,13 @@ function ConnectForm({ onConnect, error }: { onConnect: (url: string, token: str
   return (
     <form className="panel form" onSubmit={submit}>
       <h1>Connect to your hub</h1>
-      <p className="muted">Temporary sign-in with the hub's admin token. Passkey sign-in replaces this.</p>
+      {passkeys > 0 && (
+        <>
+          <button type="button" className="primary" disabled={busy} onClick={() => void withPasskey()}>Sign in with passkey</button>
+          <p className="muted">Or use the admin token, if this hub still allows it.</p>
+        </>
+      )}
+      {passkeys === 0 && <p className="muted">Sign in with the hub's admin token, then add a passkey from the Offices page.</p>}
       <label htmlFor="hub-url">Hub address</label>
       <input id="hub-url" value={url} onChange={(e) => setUrl(e.target.value)} autoComplete="off" />
       <label htmlFor="hub-token">Admin token</label>
@@ -161,9 +184,42 @@ function AddOffice({ hub, onCreated }: { hub: HubClient; onCreated: () => void }
   );
 }
 
+function Passkeys({ hub }: { hub: HubClient }) {
+  const [keys, setKeys] = useState<{ id: string; name: string; created: number }[]>([]);
+  const [name, setName] = useState("");
+  const [msg, setMsg] = useState("");
+  const load = useCallback(() => { void hub.listPasskeys().then(setKeys).catch(() => undefined); }, [hub]);
+  useEffect(load, [load]);
+  const add = async (e: FormEvent) => {
+    e.preventDefault();
+    setMsg("");
+    try { await hub.addPasskey(name.trim() || "This device"); setName(""); load(); }
+    catch (err) { setMsg((err as Error).name === "NotAllowedError" ? "Cancelled." : (err as Error).message); }
+  };
+  const remove = async (id: string, label: string) => {
+    if (!confirm(`Remove "${label}"? Everyone is signed out, including this page.`)) return;
+    try { await hub.removePasskey(id); location.reload(); } catch (err) { setMsg((err as Error).message); }
+  };
+  return (
+    <section className="panel">
+      <h2>Passkeys</h2>
+      <p className="muted">Sign in with your fingerprint, face or device lock instead of the admin token. Add one for each device you use.</p>
+      <ul className="projects">
+        {keys.map((k) => <li key={k.id}>{k.name}<button className="ghost danger" onClick={() => void remove(k.id, k.name)}>Remove</button></li>)}
+      </ul>
+      <form className="inline" onSubmit={add}>
+        <label htmlFor="passkey-name" className="sr">Passkey name</label>
+        <input id="passkey-name" placeholder="Name this device, for example Phone" value={name} onChange={(e) => setName(e.target.value)} />
+        <button className="primary">Add a passkey</button>
+      </form>
+      {msg && <p className="err" role="alert">{msg}</p>}
+    </section>
+  );
+}
+
 type Approval = { id: string; agent: string; summary: string; risk: string; reason: string };
 
-function OfficeCard(p: { office: OfficeInfo; hub: HubClient; device: Device | null; pinnedKey: string | undefined; onPinned: (k: string) => void; onOpen: () => void }) {
+function OfficeCard(p: { office: OfficeInfo; hub: HubClient; device: Device | null; pinnedKey: string | undefined; onPinned: (k: string) => void; onOpen: () => void; onDelete: () => void }) {
   const { office: o, hub, device, pinnedKey } = p;
   const [code, setCode] = useState("");
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -253,6 +309,7 @@ function OfficeCard(p: { office: OfficeInfo; hub: HubClient; device: Device | nu
         </>
       )}
       {msg && <p className={msg.kind === "ok" ? "ok" : "err"} role="status">{msg.text}</p>}
+      <div className="btns"><button className="ghost danger" onClick={p.onDelete}>Delete office</button></div>
     </article>
   );
 }
