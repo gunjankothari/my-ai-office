@@ -107,8 +107,9 @@ table.who tr.total { font-weight: 700; border-bottom: 0; }
 .timeline .when { display: inline-block; min-width: 70px; font-size: 12px; }
 .etext { color: var(--muted); }
 .roster { list-style: none; padding: 0; margin: 10px 0; display: flex; flex-direction: column; gap: 8px; }
-.roster li { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
-.roster .small { grid-column: 2 / 4; }
+.roster li { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.rowbtn .who { flex: 1 1 160px; }
+.rowbtn .small { margin-left: auto; }
 .small { font-size: 13px; }
 .avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--panel2); display: grid; place-items: center; font: 700 15px var(--font-display); }
 .btns select { width: auto; min-width: 140px; }
@@ -139,3 +140,27 @@ table.who tr.total { font-weight: 700; border-bottom: 0; }
 .picks ul { list-style: none; padding: 0; margin: 0; max-height: 280px; overflow: auto; }
 .warn { color: var(--warn); }
 .note h4 { margin: 0 0 6px; font: 700 15px var(--font-display); }
+
+/* tickets: search, board, limits */
+.toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+.toolbar input[type="search"] { flex: 1 1 200px; width: auto; }
+.check { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.check input { width: auto; }
+.board { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 10px; align-items: start; overflow-x: auto; }
+.board .col { background: var(--panel2); border-radius: 14px; padding: 10px; min-height: 80px; }
+.board .col h3 { margin: 0 0 8px; font-size: 0.9rem; }
+.board .card { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; text-align: left; width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-bottom: 8px; }
+.board .card.sel { border-color: var(--ink); }
+.boarddetail { grid-column: 1 / -1; }
+.limits meter { width: 100%; margin-top: 4px; display: block; }
+.subs { list-style: none; padding: 0; margin: 0 0 6px; }
+.subs li { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* team: agent panel and hiring */
+.rowbtn { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; width: 100%; text-align: left; background: none; border: 0; padding: 0; }
+.templates { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; margin: 10px 0; }
+.tpl { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; text-align: left; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+.tpl.on { border-color: var(--ink); }
+.agent { width: 100%; }
+.cannot summary { cursor: pointer; }
+select { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2); }

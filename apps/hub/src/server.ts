@@ -8,6 +8,7 @@ import {
   type HubToClient, type HubToHost,
 } from "@agent-office/shared";
 import { HubStore } from "./store";
+import { Passkeys, SESSION_TTL_MS } from "./passkeys";
 
 /*
  * The cloud hub is a deliberately dumb relay. It:
@@ -33,6 +34,8 @@ export interface HubOptions {
   authTimeoutMs?: number;
   /** Folder with the built web app. When set, the hub serves it. */
   webDir?: string;
+  /** Once a passkey exists, the admin token stops working for sign-in. Recovery is then done on the hub machine. Default false. */
+  requirePasskey?: boolean;
   log?: (msg: string) => void;
 }
 
@@ -122,6 +125,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
   const clients = new Map<string, ClientConn>();
   const maxRate = opts.maxMsgPerSec ?? 50;
   const origin = opts.allowedOrigin ?? "http://localhost:5173";
+  const passkeys = new Passkeys(store, origin);
   let closed = false;
 
   const sendJson = (ws: WebSocket, msg: HubToClient | HubToHost) => {
@@ -144,24 +148,28 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
   const cors = (res: ServerResponse) => {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Access-Control-Allow-Headers", "authorization, content-type");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     res.setHeader("Vary", "Origin");
   };
   const json = (res: ServerResponse, code: number, body: unknown) => {
     res.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" });
     res.end(JSON.stringify(body));
   };
-  const isAdmin = (req: IncomingMessage) => {
+  /** The admin token (unless passkeys are required and one exists) or a live session from a passkey sign-in. */
+  const tokenOk = (token: string) =>
+    (safeEq(token, opts.adminToken) && !(opts.requirePasskey && store.passkeyCount() > 0)) || store.sessionValid(token);
+  const bearer = (req: IncomingMessage) => {
     const h = req.headers.authorization ?? "";
-    return h.startsWith("Bearer ") && safeEq(h.slice(7), opts.adminToken);
+    return h.startsWith("Bearer ") ? h.slice(7) : "";
   };
-  const readBody = (req: IncomingMessage) =>
+  const isAdmin = (req: IncomingMessage) => tokenOk(bearer(req));
+  const readBody = (req: IncomingMessage, max = 4096) =>
     new Promise<string>((resolve, reject) => {
       let n = 0;
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => {
         n += c.length;
-        if (n > 4096) { reject(new Error("too large")); req.destroy(); } else chunks.push(c);
+        if (n > max) { reject(new Error("too large")); req.destroy(); } else chunks.push(c);
       });
       req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
       req.on("error", reject);
@@ -175,7 +183,36 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
     try { path = new URL(req.url ?? "/", "http://x").pathname; } catch { res.writeHead(400).end(); return; }
     try {
       if (path === "/healthz") { res.writeHead(200); res.end("ok"); return; }
+      // Sign-in. These are open on purpose: they are how someone gets a session.
+      if (path === "/auth/status" && req.method === "GET") return json(res, 200, { passkeys: store.passkeyCount() });
+      if (path === "/auth/options" && req.method === "POST") {
+        const o = await passkeys.loginOptions();
+        return o ? json(res, 200, o) : json(res, 409, { error: "no passkey yet" });
+      }
+      if (path === "/auth/verify" && req.method === "POST") {
+        const body = JSON.parse((await readBody(req, 16384)) || "{}") as { response?: any };
+        const token = await passkeys.login(body.response);
+        if (token === "locked") return json(res, 429, { error: "too many wrong attempts, wait a minute" });
+        return token ? json(res, 200, { token, expiresInMs: SESSION_TTL_MS }) : json(res, 401, { error: "sign-in failed" });
+      }
       if (path.startsWith("/api/") && !isAdmin(req)) return json(res, 401, { error: "unauthorized" });
+      if (path === "/api/logout" && req.method === "POST") { store.revokeSession(bearer(req)); return json(res, 200, { ok: true }); }
+      if (path === "/api/passkeys" && req.method === "GET") {
+        return json(res, 200, store.passkeys().map((p) => ({ id: p.id, name: p.name, created: p.created })));
+      }
+      if (path === "/api/passkeys/options" && req.method === "POST") return json(res, 200, await passkeys.registrationOptions());
+      if (path === "/api/passkeys/verify" && req.method === "POST") {
+        const body = JSON.parse((await readBody(req, 16384)) || "{}") as { response?: any; name?: unknown };
+        const r = await passkeys.register(body.response, typeof body.name === "string" ? body.name : "");
+        return r.ok ? json(res, 201, { id: r.id }) : json(res, 400, { error: "registration failed" });
+      }
+      const delKey = /^\/api\/passkeys\/([A-Za-z0-9_-]{1,300})$/.exec(path);
+      if (delKey && req.method === "DELETE") {
+        if (!store.deletePasskey(delKey[1]!)) return json(res, 404, { error: "unknown passkey" });
+        store.revokeAllSessions(); // everyone signs in again, in case the removed passkey was the one in doubt
+        for (const c of clients.values()) c.ws.close(1008, "signed out");
+        return json(res, 200, { ok: true });
+      }
       if (path === "/api/offices" && req.method === "GET") {
         return json(res, 200, store.offices().map((o) => ({ ...o, online: hosts.has(o.id) })));
       }
@@ -184,6 +221,20 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
         const name = typeof body.name === "string" ? body.name.trim().slice(0, 60) : "";
         if (!name) return json(res, 400, { error: "name required" });
         return json(res, 201, store.createOffice(name));
+      }
+      const del = /^\/api\/offices\/([A-Za-z0-9_-]{1,100})$/.exec(path);
+      if (del && req.method === "DELETE") {
+        const id = del[1]!;
+        if (!store.deleteOffice(id)) return json(res, 404, { error: "unknown office" });
+        // Cut the host off now. Its key is gone, so it cannot reconnect either.
+        hosts.get(id)?.close(4001, "office deleted");
+        hosts.delete(id);
+        for (const c of clients.values()) {
+          if (c.subs.delete(id)) sendJson(c.ws, { type: "error", code: "unknown_office", officeId: id });
+          c.talkedTo.delete(id);
+        }
+        log(`office deleted: ${id}`);
+        return json(res, 200, { ok: true });
       }
       if (opts.webDir && !path.startsWith("/api/") && (req.method === "GET" || req.method === "HEAD")) return serveStatic(req, res, opts.webDir, path);
       json(res, 404, { error: "not found" });
@@ -301,7 +352,7 @@ export async function startHub(opts: HubOptions): Promise<RunningHub> {
       const parsed = ClientToHub.safeParse(parse(data));
 
       if (!authed) {
-        if (!parsed.success || parsed.data.type !== "auth" || !safeEq(parsed.data.token, opts.adminToken)) {
+        if (!parsed.success || parsed.data.type !== "auth" || !tokenOk(parsed.data.token)) {
           sendJson(ws, { type: "error", code: "unauthorized" });
           return ws.close(1008, "unauthorized");
         }

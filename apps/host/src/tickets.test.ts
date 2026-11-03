@@ -5,6 +5,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SECRET, tmp } from "../test/helpers";
 import { Office, type OfficeOptions } from "./office";
+import { ROLE_TEMPLATES } from "@agent-office/shared";
 import { handleTeamCommand } from "./team-commands";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -234,4 +235,173 @@ test("tickets survive a restart", async () => {
   const again = (await world({}, w)).office;
   assert.equal(again.tickets.get(t.id)!.title, "keep me");
   assert.equal(again.tickets.create({ projectId: "p", title: "next", createdBy: "user" }).id, "T-2");
+});
+
+test("subtickets and 'after' links stay inside one project, and a parent's usage includes its subtickets", async () => {
+  const { office } = await world();
+  const parent = office.tickets.create({ projectId: "p", title: "Parent", createdBy: "user" });
+  const kid = office.tickets.create({ projectId: "p", title: "Kid", createdBy: "user", parentId: parent.id });
+  const other = office.tickets.create({ projectId: "q", title: "Elsewhere", createdBy: "user" });
+  assert.throws(() => office.tickets.create({ projectId: "p", title: "x", createdBy: "user", parentId: other.id }), /not a ticket in this project/);
+  assert.throws(() => office.tickets.create({ projectId: "p", title: "x", createdBy: "user", afterId: "T-999" }), /not a ticket in this project/);
+  office.tickets.addUsage(parent.id, "ada", { tokens: 100, costUsd: 0.01 });
+  office.tickets.addUsage(kid.id, "quinn", { tokens: 50, costUsd: 0.005 });
+  assert.equal(office.tickets.rolledUp(parent.id).tokens, 150);
+  assert.equal(office.tickets.get(parent.id)!.usage.tokens, 100, "its own usage is unchanged");
+  const got = await cmd(office, "tickets.get", { id: parent.id });
+  assert.equal(got.subtickets.length, 1);
+  assert.equal(got.rolledUp.tokens, 150);
+});
+
+test("a ticket that comes 'after' another waits until it is done", async () => {
+  const { office } = await world();
+  const a = office.tickets.create({ projectId: "p", title: "First", createdBy: "user" });
+  const b = office.tickets.create({ projectId: "p", title: "Second", description: "[scenario:read]", createdBy: "user", assigneeId: "ada", afterId: a.id });
+  office.dispatcher.tick();
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(b.id)!.status, "assigned", "still waiting for the first");
+  assert.equal(office.tickets.blockedBy(office.tickets.get(b.id)!)?.id, a.id);
+  office.tickets.update(a.id, { status: "done" });
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(b.id)!.status, "done");
+});
+
+test("if the ticket it waits for fails, it asks you, and goes on without the link when you say so", async () => {
+  const { office } = await world();
+  const a = office.tickets.create({ projectId: "p", title: "First", createdBy: "user" });
+  const b = office.tickets.create({ projectId: "p", title: "Second", description: "[scenario:read]", createdBy: "user", assigneeId: "ada", afterId: a.id });
+  office.tickets.update(a.id, { status: "failed" });
+  await office.dispatcher.drain();
+  const asked = office.tickets.get(b.id)!;
+  assert.equal(asked.status, "waiting_user");
+  assert.equal(kinds(office, b.id).at(-1), "blocked");
+  await cmd(office, "tickets.reply", { id: b.id, text: "go on without it" });
+  assert.equal(office.tickets.get(b.id)!.afterId, undefined);
+  assert.equal(office.tickets.get(b.id)!.assigneeId, "ada", "it stays with the same agent");
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(b.id)!.status, "done");
+});
+
+test("a ticket that reaches its token budget stops and asks, and a yes gives it more room", async () => {
+  const { office } = await world();
+  const t = office.tickets.create({ projectId: "p", title: "Costly", description: "[scenario:read]", createdBy: "user", assigneeId: "ada", budgetTokens: 100 });
+  office.tickets.addUsage(t.id, "ada", { tokens: 120 });
+  await office.dispatcher.drain();
+  const stopped = office.tickets.get(t.id)!;
+  assert.equal(stopped.status, "waiting_user");
+  assert.equal(kinds(office, t.id).at(-1), "limit_reached");
+  assert.match(stopped.question!, /budget/);
+  assert.equal(office.agents.get("ada")!.tokensToday, 0, "no run was started");
+
+  await cmd(office, "tickets.reply", { id: t.id, text: "yes, continue" });
+  assert.ok(office.tickets.get(t.id)!.budgetTokens! > 120, "the budget grew past what was used");
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(t.id)!.status, "done");
+});
+
+test("the budget counts a ticket's subtickets, and the round limit counts every run", async () => {
+  const { office } = await world();
+  const parent = office.tickets.create({ projectId: "p", title: "Big", description: "[scenario:read]", createdBy: "user", assigneeId: "ada", budgetTokens: 100 });
+  const kid = office.tickets.create({ projectId: "p", title: "Part", createdBy: "user", parentId: parent.id });
+  office.tickets.addUsage(kid.id, "quinn", { tokens: 150 });
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(parent.id)!.status, "waiting_user", "the subticket's tokens counted");
+
+  const r = office.tickets.create({ projectId: "p", title: "Many rounds", description: "[scenario:read]", createdBy: "user", assigneeId: "ada", maxRounds: 2 });
+  office.tickets.addUsage(r.id, "ada", {});
+  office.tickets.addUsage(r.id, "ada", {});
+  await office.dispatcher.drain();
+  assert.match(office.tickets.get(r.id)!.question!, /2 rounds/);
+});
+
+test("limits are validated, and tickets saved before limits existed get the default", async () => {
+  const { office } = await world();
+  await assert.rejects(cmd(office, "tickets.create", { projectId: "p", title: "x", budgetTokens: 5 }));
+  await assert.rejects(cmd(office, "tickets.create", { projectId: "p", title: "x", maxRounds: 0 }));
+  await assert.rejects(cmd(office, "tickets.create", { projectId: "p", title: "x", parentId: "T-999" }));
+  const ok = await cmd(office, "tickets.create", { projectId: "p", title: "x", budgetTokens: 50_000, maxRounds: 3 });
+  assert.equal(ok.maxRounds, 3);
+  assert.equal(ok.budgetTokens, 50_000);
+});
+
+test("a paused agent starts no new work until resumed", async () => {
+  const { office } = await world();
+  const t = office.tickets.create({ projectId: "p", title: "Queued", description: "[scenario:read]", createdBy: "user", assigneeId: "ada" });
+  await cmd(office, "agents.pause", { id: "ada" });
+  assert.equal((await cmd(office, "team.list", { projectId: "p" })).agents.find((a: any) => a.id === "ada").paused, true);
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(t.id)!.status, "assigned", "waits while paused");
+  await cmd(office, "agents.resume", { id: "ada" });
+  await office.dispatcher.drain();
+  assert.equal(office.tickets.get(t.id)!.status, "done");
+});
+
+test("an agent's description and approval mode can be changed, and bad input is refused", async () => {
+  const { office } = await world();
+  await cmd(office, "agents.update", { id: "ada", mode: "every", skills: "rust", role: "Backend developer" });
+  const a = office.agents.get("ada")!;
+  assert.deepEqual([a.mode, a.skills, a.role], ["every", "rust", "Backend developer"]);
+  assert.equal(office.agentCtx("ada")!.mode, "every", "the gateway sees the new mode at once");
+  await cmd(office, "agents.update", { id: "ada", skills: "" });
+  assert.equal(office.agents.get("ada")!.skills, undefined);
+  await assert.rejects(cmd(office, "agents.update", { id: "ada", mode: "yolo" }));
+  await assert.rejects(cmd(office, "agents.update", { id: "ada", name: "" }));
+  await assert.rejects(cmd(office, "agents.update", { id: "nobody", role: "x" }), /unknown agent/);
+  assert.equal(office.grants.filter((g) => g.agentId === "ada").length, 2, "access is untouched by an update");
+});
+
+test("the agent panel shows what an agent can and cannot do, by name only", async () => {
+  const { office } = await world();
+  const ada = await cmd(office, "agents.get", { id: "ada" });
+  const allowed = ada.access.flatMap((x: any) => x.tools);
+  assert.deepEqual(allowed.sort(), ["list_pull_requests", "merge_pull_request"]);
+  const refused = ada.cannot.flatMap((c: any) => c.tools);
+  assert.ok(refused.length > 0 && refused.every((n: string) => !allowed.includes(n)), "the Cannot list holds exactly the tools not granted");
+  assert.ok(!JSON.stringify(ada).includes(SECRET));
+
+  const quinn = await cmd(office, "agents.get", { id: "quinn" });
+  assert.equal(quinn.access.length, 0, "a new teammate starts with no access");
+  assert.ok(quinn.cannot.length > 0);
+
+  const mgr = await cmd(office, "agents.get", { id: "manager-p" });
+  assert.deepEqual(mgr.managerTools.sort(), ["ask_user", "assign_ticket"]);
+  assert.equal(mgr.cannot.length, 0);
+});
+
+test("firing removes the agent and its access, returns its queue to the Manager, and keeps the history", async () => {
+  const { office } = await world();
+  const queued = office.tickets.create({ projectId: "p", title: "Queued", createdBy: "user", assigneeId: "ada" });
+  const r = await cmd(office, "agents.fire", { id: "ada" });
+  assert.deepEqual(r.returnedTickets, [queued.id]);
+  assert.equal(office.agents.has("ada"), false);
+  assert.equal(office.grants.some((g) => g.agentId === "ada"), false);
+  const t = office.tickets.get(queued.id)!;
+  assert.deepEqual([t.status, t.assigneeId], ["new", undefined]);
+  assert.ok(t.events.some((e) => e.text?.includes("left the team")));
+  assert.equal((await office.gateway.call("ada", "github", "list_pull_requests", { owner: "acme", repo: "app" })).status, "denied");
+  assert.ok(office.audit.recent(100).some((l) => (l.event as { kind?: string }).kind === "agent.fired"), "the audit log records it");
+  await assert.rejects(cmd(office, "agents.fire", { id: "ada" }), /unknown agent/);
+});
+
+test("an agent that is working or waiting for you cannot be fired", async () => {
+  const { office } = await world();
+  const t = office.tickets.create({ projectId: "p", title: "Busy", createdBy: "user", assigneeId: "ada" });
+  office.tickets.update(t.id, { status: "progress" });
+  await assert.rejects(cmd(office, "agents.fire", { id: "ada" }), /working or waiting/);
+  office.tickets.update(t.id, { status: "waiting_approval" });
+  await assert.rejects(cmd(office, "agents.fire", { id: "ada" }), /working or waiting/);
+  assert.ok(office.agents.has("ada"));
+  assert.ok(office.grants.some((g) => g.agentId === "ada"), "nothing was removed");
+});
+
+test("every role template is valid, and hiring from one gives no tool access", async () => {
+  const ids = new Set(ROLE_TEMPLATES.map((r) => r.id));
+  assert.equal(ids.size, ROLE_TEMPLATES.length);
+  const { office } = await world();
+  for (const r of ROLE_TEMPLATES) {
+    const id = `hire-${r.id}`;
+    await cmd(office, "agents.add", { id, name: r.role, role: r.role, skills: r.skills, mode: r.mode, engineModel: r.engineModel, projectId: "p" });
+    assert.equal(office.grants.filter((g) => g.agentId === id).length, 0, `${r.id} starts with no access`);
+    assert.equal(office.gateway.listTools(id).length, 0);
+  }
 });

@@ -1,3 +1,4 @@
+import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import { HubToClient, type StatusSnapshot } from "@agent-office/shared";
 
 export interface OfficeInfo {
@@ -26,8 +27,39 @@ export class HubClient {
     return (await r.json()) as T;
   }
 
+  /** Does this hub have a passkey to sign in with? Needs no sign-in. */
+  static async passkeyCount(baseUrl: string): Promise<number> {
+    try {
+      const r = await fetch(baseUrl + "/auth/status");
+      return r.ok ? ((await r.json()) as { passkeys: number }).passkeys : 0;
+    } catch { return 0; }
+  }
+
+  /** Asks this device for a passkey and returns a session token. */
+  static async passkeyLogin(baseUrl: string): Promise<string> {
+    const post = (path: string, body: unknown) => fetch(baseUrl + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const o = await post("/auth/options", {});
+    if (!o.ok) throw new Error("This hub has no passkey yet. Sign in with the admin token and add one.");
+    const response = await startAuthentication({ optionsJSON: await o.json() });
+    const v = await post("/auth/verify", { response });
+    if (v.status === 429) throw new Error("Too many wrong attempts. Wait a minute.");
+    if (!v.ok) throw new Error("That passkey was not accepted.");
+    return ((await v.json()) as { token: string }).token;
+  }
+
+  listPasskeys = () => this.api<{ id: string; name: string; created: number }[]>("/api/passkeys");
+  removePasskey = (id: string) => this.api<{ ok: true }>(`/api/passkeys/${encodeURIComponent(id)}`, { method: "DELETE" });
+  async addPasskey(name: string): Promise<void> {
+    const optionsJSON = await this.api<Parameters<typeof startRegistration>[0]["optionsJSON"]>("/api/passkeys/options", { method: "POST", body: "{}" });
+    const response = await startRegistration({ optionsJSON });
+    await this.api("/api/passkeys/verify", { method: "POST", body: JSON.stringify({ name, response }) });
+  }
+  logout = () => this.api<{ ok: true }>("/api/logout", { method: "POST", body: "{}" }).catch(() => undefined);
+
   listOffices = () => this.api<OfficeInfo[]>("/api/offices");
   createOffice = (name: string) => this.api<{ id: string; enrollToken: string }>("/api/offices", { method: "POST", body: JSON.stringify({ name }) });
+
+  deleteOffice = (id: string) => this.api<{ ok: true }>(`/api/offices/${encodeURIComponent(id)}`, { method: "DELETE" });
 
   /** Opens the live connection. The token is sent as the first message, never in the address. */
   connect(): Promise<void> {

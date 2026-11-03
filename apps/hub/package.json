@@ -3,7 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/server.ts" },
+  "exports": {
+    ".": "./src/server.ts"
+  },
   "scripts": {
     "dev": "tsx src/main.ts",
     "typecheck": "tsc -p tsconfig.json",
@@ -11,6 +13,7 @@
   },
   "dependencies": {
     "@agent-office/shared": "*",
+    "@simplewebauthn/server": "^14.0.3",
     "ws": "^8.18.0"
   },
   "devDependencies": {

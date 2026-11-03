@@ -6,6 +6,7 @@ import type { Ticket, TicketEvent, TicketEventKind, TicketPriority, TicketStatus
  * Every change appends an event, so "who worked on it, when, and what it cost" can always be read back.
  */
 
+export const DEFAULT_MAX_ROUNDS = 6;
 const MAX_EVENTS = 300;
 const MAX_TEXT = 2000;
 const clip = (t: string | undefined, n = MAX_TEXT) => (t === undefined ? undefined : t.length > n ? t.slice(0, n) + "…" : t);
@@ -23,7 +24,8 @@ export class TicketStore {
     if (existsSync(file)) {
       const s = JSON.parse(readFileSync(file, "utf8")) as Persisted;
       this.next = s.next;
-      s.tickets.forEach((t) => this.tickets.set(t.id, t));
+      // Tickets saved before limits existed get the default.
+      s.tickets.forEach((t) => this.tickets.set(t.id, { ...t, maxRounds: t.maxRounds ?? DEFAULT_MAX_ROUNDS }));
     }
   }
 
@@ -33,11 +35,18 @@ export class TicketStore {
     renameSync(tmp, this.file);
   }
 
-  create(i: { projectId: string; title: string; description?: string; priority?: TicketPriority; createdBy: string; assigneeId?: string }): Ticket {
+  create(i: { projectId: string; title: string; description?: string; priority?: TicketPriority; createdBy: string; assigneeId?: string; parentId?: string; afterId?: string; budgetTokens?: number; maxRounds?: number }): Ticket {
+    for (const link of [i.parentId, i.afterId]) {
+      if (!link) continue;
+      const other = this.tickets.get(link);
+      if (!other || other.projectId !== i.projectId) throw new Error(`${link} is not a ticket in this project`);
+    }
     const ts = this.now();
     const t: Ticket = {
       id: `T-${this.next++}`, projectId: i.projectId, title: clip(i.title.trim(), 200)!, description: clip(i.description?.trim() ?? "", 8000)!,
       status: i.assigneeId ? "assigned" : "new", priority: i.priority ?? "normal", assigneeId: i.assigneeId, createdBy: i.createdBy,
+      ...(i.parentId ? { parentId: i.parentId } : {}), ...(i.afterId ? { afterId: i.afterId } : {}),
+      ...(i.budgetTokens ? { budgetTokens: i.budgetTokens } : {}), maxRounds: i.maxRounds ?? DEFAULT_MAX_ROUNDS,
       createdAt: ts, updatedAt: ts, usage: { tokens: 0, costUsd: 0, runs: 0 }, workers: {}, events: [],
     };
     this.tickets.set(t.id, t);
@@ -55,12 +64,53 @@ export class TicketStore {
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
+  /** Direct subtickets, oldest first. */
+  children(id: string): Ticket[] {
+    return [...this.tickets.values()].filter((t) => t.parentId === id).sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** The ticket's own usage plus that of every ticket below it. Links are fixed at creation, so there are no loops. */
+  rolledUp(id: string): TicketUsage {
+    const t = this.tickets.get(id);
+    const sum: TicketUsage = { tokens: t?.usage.tokens ?? 0, costUsd: t?.usage.costUsd ?? 0, runs: t?.usage.runs ?? 0 };
+    for (const c of this.children(id)) {
+      const u = this.rolledUp(c.id);
+      sum.tokens += u.tokens; sum.costUsd = Math.round((sum.costUsd + u.costUsd) * 1e6) / 1e6; sum.runs += u.runs;
+    }
+    return sum;
+  }
+
+  /** The ticket it waits for, while that ticket is not done. */
+  blockedBy(t: Ticket): Ticket | undefined {
+    const a = t.afterId ? this.tickets.get(t.afterId) : undefined;
+    return a && a.status !== "done" ? a : undefined;
+  }
+
+  /** Why this ticket should not run another round, if so. */
+  overLimit(t: Ticket): string | undefined {
+    const used = this.rolledUp(t.id);
+    if (t.budgetTokens && used.tokens >= t.budgetTokens) return `It has used ${used.tokens.toLocaleString()} tokens, which reaches its budget of ${t.budgetTokens.toLocaleString()}.`;
+    if (t.usage.runs >= t.maxRounds) return `It has had ${t.usage.runs} rounds of work, which reaches its limit of ${t.maxRounds}.`;
+    return undefined;
+  }
+
+  /** Called when the user chooses to go on after a limit stop: the limits that were hit grow, so it does not stop again at once. */
+  raiseLimits(id: string): void {
+    const t = this.tickets.get(id);
+    if (!t) return;
+    const used = this.rolledUp(id);
+    if (t.budgetTokens && used.tokens >= t.budgetTokens) t.budgetTokens = Math.ceil(Math.max(t.budgetTokens * 2, used.tokens * 1.5));
+    if (t.usage.runs >= t.maxRounds) t.maxRounds += DEFAULT_MAX_ROUNDS;
+    this.save();
+  }
+
   /** Changes a ticket and records why. `patch` is applied first, then the event is appended. */
-  update(id: string, patch: Partial<Pick<Ticket, "status" | "assigneeId" | "question" | "result" | "priority" | "triageBy">>, ev?: { kind: TicketEventKind; actor: string; text?: string; tokens?: number; costUsd?: number }): Ticket {
+  update(id: string, patch: Partial<Pick<Ticket, "status" | "assigneeId" | "question" | "result" | "priority" | "triageBy" | "afterId">>, ev?: { kind: TicketEventKind; actor: string; text?: string; tokens?: number; costUsd?: number }): Ticket {
     const t = this.tickets.get(id);
     if (!t) throw new Error("unknown ticket");
     Object.assign(t, patch);
     if (patch.question === undefined && "question" in patch) delete t.question;
+    if (patch.afterId === undefined && "afterId" in patch) delete t.afterId;
     if (ev) this.event(t, ev.kind, ev.actor, ev.text, false, ev.tokens, ev.costUsd);
     t.updatedAt = this.now();
     this.save();

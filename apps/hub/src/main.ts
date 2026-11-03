@@ -29,6 +29,7 @@ const hub = await startHub({
   bindHost: process.env.BIND_HOST ?? "127.0.0.1",
   allowedOrigin: process.env.HUB_ALLOWED_ORIGIN ?? (publicDomain ? `https://${publicDomain}` : "http://localhost:5173"),
   webDir,
+  requirePasskey: process.env.HUB_REQUIRE_PASSKEY === "1",
   log: (m) => console.log(`[hub] ${m}`),
 });
 console.log(`[hub] database: ${dbPath}${webDir ? `, serving the web app from ${webDir}` : ""}`);

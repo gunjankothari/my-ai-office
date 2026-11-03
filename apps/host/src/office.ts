@@ -37,6 +37,8 @@ export interface AgentRecord {
   engineModel?: string;
   /** While asleep (usage limit reached): when to try again. */
   sleepUntil?: number;
+  /** Paused: no new work is started for this agent. A run in progress, or one you just approved, finishes. */
+  paused?: boolean;
   /** "manager" triages tickets and hands them out. Everyone else does the work. */
   kind?: "manager";
   /** What this agent is good at, in a few words. The Manager chooses by role and skills. */
@@ -208,6 +210,50 @@ export class Office {
     if (!this.projects.has(a.projectId)) throw new Error(`unknown project ${a.projectId}`);
     this.agents.set(a.id, { status: "idle", tokensToday: 0, ...a });
     this.saveState();
+  }
+
+  /** Changes how an agent is described and how careful it is. Nothing here touches what it may access. */
+  updateAgent(id: string, patch: Partial<Pick<AgentRecord, "name" | "role" | "skills" | "mode" | "engineModel">>): AgentRecord {
+    const a = this.agents.get(id);
+    if (!a) throw new Error("unknown agent");
+    for (const [k, v] of Object.entries(patch)) if (v !== undefined) (a as unknown as Record<string, unknown>)[k] = v === "" && (k === "skills" || k === "engineModel") ? undefined : v;
+    this.saveState();
+    this.audit.append({ kind: "agent.updated", projectId: a.projectId, agentId: id, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined) });
+    return a;
+  }
+
+  setPaused(id: string, paused: boolean): void {
+    const a = this.agents.get(id);
+    if (!a) throw new Error("unknown agent");
+    a.paused = paused || undefined;
+    this.saveState();
+    this.audit.append({ kind: paused ? "agent.paused" : "agent.resumed", projectId: a.projectId, agentId: id });
+    if (!paused) this.dispatcher.kick();
+  }
+
+  /**
+   * Removes an agent and every grant it had. Refused while it is working or waiting on you, because a run
+   * cut off half-way may already have had effects. Its open tickets go back for the Manager to hand out again.
+   * What it did stays on the tickets and in the audit log.
+   */
+  fireAgent(id: string): { returnedTickets: string[] } {
+    const a = this.agents.get(id);
+    if (!a) throw new Error("unknown agent");
+    const mine = this.tickets.list({ open: true }).filter((t) => t.assigneeId === id);
+    if (a.status === "working" || mine.some((t) => t.status === "progress" || t.status === "planning" || t.status === "waiting_approval") || this.approvals.pending().some((p) => p.agentId === id)) {
+      throw new Error(`${a.name} is working or waiting for your answer. Pause them and let it finish, or cancel the ticket, then try again.`);
+    }
+    const returned: string[] = [];
+    for (const t of mine) {
+      this.tickets.update(t.id, { status: "new", assigneeId: undefined }, { kind: "assigned", actor: "office", text: `${a.name} left the team. The ticket goes back to be handed out again.` });
+      returned.push(t.id);
+    }
+    for (const g of this.grants.filter((x) => x.agentId === id)) this.revokeGrant(g.id);
+    this.agents.delete(id);
+    this.saveState();
+    this.audit.append({ kind: "agent.fired", projectId: a.projectId, agentId: id, returnedTickets: returned });
+    this.dispatcher.kick();
+    return { returnedTickets: returned };
   }
 
   addGrant(g: Grant): void {
